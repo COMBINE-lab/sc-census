@@ -1,0 +1,443 @@
+---
+title: "Transcriptomic Gene Expression Count Matrices Analysis"
+author: "Dongze He, Steve M. Mount, and Rob Patro"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        code_folding: hide
+        fig_caption: true
+        self_contained: true
+
+params:
+    celltypist_csv: null
+    quant_dir: null
+    out_dir: null
+    sample_type: null
+    num_threads: 1
+    num_pcs: 50
+    logfc.threshold: 0.25
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_library}
+
+if (!require("findPC")) {
+    devtools::install_github("haotian-zhuang/findPC")
+}
+
+if (!require("clevr")) {
+    install.packages("clevr", verbose = FALSE, quiet = TRUE)
+}
+
+# if (!require("ggVennDiagram")) {
+#     install.packages("ggVennDiagram", verbose = FALSE, quiet = TRUE)
+# }
+
+
+suppressPackageStartupMessages({
+    library(fishpond)
+    library(Seurat)
+    library(doParallel)
+    library(SingleCellExperiment)
+    library(pheatmap)
+    library(RColorBrewer)
+    library(ggpubr)
+    library(ggplot2)
+    library(igraph)
+    library(openxlsx)
+    library(HGNChelper)
+    library(ggVennDiagram)
+    library(UpSetR)
+})
+
+
+sample_type_to_tissue_dict <- list(
+    human_pbmc = "Immune system",
+    huamn_bmmc = "Immune system",
+    human_brain = "Brain",
+)
+
+params = list(
+    celltypist_csv = "celltypist_predictions.csv",
+    utils_path = "/nfshomes/zaza/cbcb-scratch/Projects/sc_read_concensus/nextflow/modules/downstream_analysis/r_utils.R",
+    quant_dir = ".",
+    out_dir = ".",
+    sample_type = "cell",
+    num_threads = 10,
+    num_pcs = 50,
+    high_clustering_resolution = 0.8,
+    mid_clustering_resolution = 0.5,
+    low_clustering_resolution = 0.2,
+    logfc.threshold = 0.25
+)
+
+source(params$utils_path)
+```
+## Introduction
+
+Clustering analysis is an important data analysis type in scRNA-seq analysis. Conventionally, this analysis utlizes the ``conventional" gene expression count matrix -- the spliced+ambiguous (SA) UMI count matrix for single-cell samples, and spliced+unspliced+ambiguous (USA) UMI count matrix for single-nucleus samples. Recently, Cell Ranger started to use the spliced+unspliced+ambiguous UMI count matrix as the default setting for both single-cell and single-nucleus samples. They also posted a technical note showing that this changes can improve the gene discovery rate, and at the same time does not affect the clustering results.
+
+In this analysis, we want to show that 
+1. this change, from SA to USA, does affect the clustering results in single-cell samples, and it will affect the differentially expressed genes discovered in each cluster/cell type.
+2. extending from the first point, we want to show that, when fixing the number of clusters, the clustering results using different count matrices, including open chromatin region-assotiated count matrices, are similar but not identical, and the differentially expressed genes discovered in each cluster/cell type are different. Here we tested three set of cluster sizes: a low number of clusters, a medium number of clusters, and a high number of clusters. 
+    - low number of clusters: the number of clsuters taht can be easily identified by eye-balling the tSNE/UMAP plot
+    - medium number of clusters: the number of cell types identified by celltypist or sctype using the conventional count matrix: SA for single-cell samples, and USA for single-nucleus samples.
+    - high number of clusters: $1.5$ times the medium number of clusters.
+3. we want to comment on a recent paper about concatenating SA and U as the input for clustering analysis (https://www.biorxiv.org/content/10.1101/2023.09.17.558131v2.full.pdf). We want to show that when fixing the number of clusters, all count matrices will give similar clustering results, and the differentially expressed genes discovered in each cluster/cell type are different. For the USA matrix, we want to show its DEGs almost forms a superset of the DEGs in the SA matrix and U matrix, and their methods just generated another very similar results.
+
+From this analysis, we want to draw the following conclusions:
+1. All UMI count matrices we analyzed contain biological information.
+2. The DEGs discovered in each cluster/cell type are different, and the DEGs discovered in the USA matrix almost forms a superset of the DEGs discovered in the SA matrix and U matrix. We want to call the arm to either generate a concensus DEG list using all count matrices, or to redefine the "DE" analysis in single-cell analysis representing the modalities. 
+
+## Preprocessing
+
+```{r define_out_dirs}
+heatmap_dir <- file.path(params$out_dir, "similarity_score_heatmaps")
+deg_dir <- file.path(params$out_dir,"DEG_results")
+dim_reduc_dir <- file.path(params$out_dir, "dim_reduction_plots")
+umap_dir <- file.path(dim_reduc_dir, "umap_plots")
+tsne_dir <- file.path(dim_reduc_dir, "tsne_plots")
+dir.create(heatmap_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(dim_reduc_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(umap_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tsne_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(deg_dir,  recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r set_env}
+# parallel
+n_threads <- params$num_threads
+
+# pipeline
+verbose <- FALSE
+high_clustering_resolution <- params$high_clustering_resolution
+mid_clustering_resolution <- params$mid_clustering_resolution
+low_clustering_resolution <- params$low_clustering_resolution
+logfc.threshold = params$logfc.threshold
+
+metrics = c("ari", "fmi", "nmi")
+# metrics = c("ari", "knn_spearman")
+```
+
+```{r load_data}
+sce = loadFry(params$quant_dir, outputFormat = "raw")
+gid2name_df <- read.csv(file.path(params$quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
+
+# we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
+rownames(sce) <- make.unique(gid2name_df[match(rownames(sce), gid2name_df[,1]),2])
+```
+
+```{r load_celltypist}
+celltypist_df <- read.csv(params$celltypist_csv, stringsAsFactors = FALSE)
+sce = sce[,colnames(sce) %in% celltypist_df$barcode]
+```
+
+## create Seurat objects
+
+We will have three versions of the counts
+- SA: The sum of spliced and ambiguous count
+- USA: The sum of spliced, unspliced and ambiguous count
+- S: Spliced count
+- U: Unspliced count
+- A: Ambiguous count
+
+Then, we will use these count matrices to find cell clusters. We will find three sets of clusters, each set with a different number of clusters. The three sets of clusters are:
+- low number of clusters: 1/3 of the number of cell types discovered by celltypist
+- medium number of clusters: the number of cell types discovered by celltypist1
+- high number of clusters: 1.5 times the number of cell types discovered by celltypist
+
+We wish to show that when the resolution is low, the clustering result of all count matrices agree with each other. However, when increase the resolution, the clustering results of different count matrices will be different.
+
+```{r create_seurat_objects}
+if (n_threads < 2) {
+    registerDoSEQ()
+} else {
+    registerDoParallel(cores = n_threads)
+}
+
+seurat_obj_list <- list(
+    USA = list(
+        count_type = "USA",
+        seurat_obj = create_seurat_obj(
+            m = sce@assays@data$spliced + sce@assays@data$unspliced + sce@assays@data$ambiguous,
+            sce = sce,
+            project = "USA"
+        )
+    ),
+    SA = list(
+        count_type = "SA",
+        seurat_obj = create_seurat_obj(
+            m = sce@assays@data$spliced + sce@assays@data$ambiguous,
+            sce = sce,
+            project = "SA"
+        )
+    ),
+    U = list(
+        count_type = "U",
+        seurat_obj = create_seurat_obj(
+            m = sce@assays@data$unspliced,
+            sce = sce,
+            project = "U"
+        )
+    ),
+    S = list(
+        count_type = "S",
+        seurat_obj = create_seurat_obj(
+            m = sce@assays@data$spliced,
+            sce = sce,
+            project = "S"
+        )
+    ),
+    A = list(
+        count_type = "A",
+        seurat_obj = create_seurat_obj(
+            m = sce@assays@data$ambiguous,
+            sce = sce,
+            project = "A"
+        )
+    )
+)
+
+n_celltypist_clusters = length(unique(celltypist_df$majority_voting))
+
+all_clusters_result_list <- foreach(n_clusters = c(floor(n_celltypist_clusters/2),n_celltypist_clusters, ceiling(n_celltypist_clusters * 1.5)), .combine = "c") %dopar% {
+    # create clusters result list
+    clusters_result_list <-
+        foreach(seurat_obj_set = seurat_obj_list, .combine = "c") %dopar% {
+            seurat_obj <- seurat_obj_set$seurat_obj
+            count_type <- seurat_obj_set$count_type
+
+            result_list = list()
+            result_list[[count_type]]$name <- count_type
+            result_list[[count_type]]$clusters_result <- seurat_clusters(
+                seurat_obj = seurat_obj,
+                n_clusters = n_clusters
+            )
+            result_list
+        }
+
+    heatmap_list <- make_heatmaps(
+        clusters_result_list = clusters_result_list,
+        main = paste0("(", n_clusters, " clusters)"),
+        dataset_id = "my_data",
+        metrics = metrics,
+        fontsize = 10
+    )
+
+    dir.create(file.path(heatmap_dir, paste0(n_clusters,"_clusters")), recursive = TRUE, showWarnings = FALSE)
+    for (metric in paste0(metrics, "_heatmap")) {
+        pdf(file.path(heatmap_dir, 
+                        paste0(n_clusters,"_clusters"), 
+                        paste0(metric,".pdf")
+                    )
+            #         ,
+            # width = 10,
+            # height = 10
+        )
+        plot(heatmap_list[[metric]])
+        dev.off()
+    }
+    out_list = list()
+
+    out_list[[as.character(n_clusters)]] = list(
+        n_clusters = n_clusters,
+        clusters_result_list = clusters_result_list,
+        heatmap_list = heatmap_list
+    )
+
+    out_list
+}
+
+```
+
+## Next, just for visualization purpose, we plot the tSNE/UMAP plot for each count matrix using celltypist clusters
+
+```{r plot_dim_reduction}
+
+cell_to_cluster_map = celltypist_df[,c("majority_voting")]
+
+names(cell_to_cluster_map) <- celltypist_df[,c("barcodes")]
+
+clusters_result_list = foreach (clusters_result_set=all_clusters_result_list[[as.character(n_celltypist_clusters)]]$clusters_result_list, .combine = "c") %dopar% {
+    seurat_obj <- clusters_result_set$clusters_result$seurat_obj
+    count_type <- clusters_result_set$name
+
+    seurat_obj <- AddMetaData(
+        object = seurat_obj,
+        metadata = cell_to_cluster_map[colnames(seurat_obj)],
+        col.name = "celltypist_clusters"
+    )
+    seurat_obj <- RunUMAP(
+        object = seurat_obj,
+        dims = clusters_result_set$clusters_result$pcs,
+        verbose = FALSE
+    )
+    seurat_obj <- RunTSNE(
+        object = seurat_obj,
+        dims = clusters_result_set$clusters_result$pcs,
+        verbose = FALSE
+    )
+    
+    Idents(seurat_obj) <- "seurat_clusters"
+    su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0(count_type, " counts UMAP plot colored by seurat clusters"))
+    st = DimPlot(seurat_obj, reduction = "tsne")  + patchwork::plot_annotation(title = paste0(count_type, " counts tSNE plot colored by seurat clusters"))
+
+    Idents(seurat_obj) <- "celltypist_clusters"
+    cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0(count_type, " counts UMAP plot colored by celltypist clusters"))
+    ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0(count_type, " counts tSNE plot colored by celltypist clusters"))
+
+    # plot tSNE
+    pdf(file.path(tsne_dir,paste0(count_type,"_tSNE.pdf")),width = 20,height = 10)
+    print(ggarrange(plotlist = list(st,ct)))
+    dev.off()
+    tsne_plot_list = c(tsne_plot_list, st)
+    tsne_plot_list = c(tsne_plot_list, ct)
+
+    # plot UMAP
+    pdf(file.path(umap_dir,paste0(count_type,"_UMAP.pdf")),width = 20,height = 10)
+    print(ggarrange(plotlist = list(su,cu)))
+    dev.off()
+    
+    umap_plot_list = c(umap_plot_list, su)
+    umap_plot_list = c(umap_plot_list, cu)
+
+    clusters_result_set$clusters_result$seurat_obj <- seurat_obj
+
+    clusters_result_set$heatmap_list = list(
+        tsne_seurat_clusters = st, 
+        tsne_celltypist_clusters = ct, 
+        umap_seurat_clusters = su, 
+        umap_celltypist_clusters = cu
+    )
+    out_list = list()
+    out_list[[count_type]] = clusters_result_set
+    out_list
+}
+
+```
+
+## DEG analysis
+
+In this section, we find the marker genes for each cluster/cell type in each count matrix, and compare the DEGs discovered for each cell type across count matrices.
+
+To make the DEGs from different count matrices comparable, we will use the same clustering results for all count matrices. We will use the clustering results from celltypist.
+
+```{r create_DEG_list}
+# we find markers using each of the count types for each of the identification sets
+verbose = TRUE
+marker_df_list <-
+    foreach(clusters_result_set = clusters_result_list, .combine=c) %dopar% {
+        if (verbose)
+            message(paste0("  - Finding markers for ", clusters_result_set$name))
+        
+        seurat_obj <-
+            clusters_result_set$clusters_result$seurat_obj
+        Idents(seurat_obj) <- "celltypist_clusters"
+        
+        # we find markers for each of the identification set
+        all_markers_df <- FindAllMarkers(
+            object = seurat_obj,
+            verbose = FALSE
+        )
+        
+        out_list = list()
+        out_list[[clusters_result_set$name]] = list(
+            name = clusters_result_set$name,
+            all_markers_df = all_markers_df
+        )
+        out_list
+    }
+
+# reorganize the list
+# we want the DEGs of each cell type to be in the same list, split by count type
+cell_type_count_type_marker_list <- list()
+# iterate over count types
+for (marker_df_set in marker_df_list) {
+    # iterate over cell types
+    for (cell_type in levels(marker_df_set$all_markers_df$cluster)) {
+        deg_df <- marker_df_set$all_markers_df[marker_df_set$all_markers_df$cluster == cell_type,]
+                            
+        # filter if needed
+        deg_df = filter_deg_df(
+            deg_df,
+            assay_name = marker_df_set$name,
+            only_positive = FALSE,
+            report_size = 100,
+            report_size_factor = 2,
+            assays.use.report_size_factor = c("USA")
+        )
+        
+        if (nrow(deg_df) > 0) {
+            cell_type_count_type_marker_list[[cell_type]][[marker_df_set$name]]  = deg_df$gene
+        }
+    }
+}
+
+```
+
+```{r plot_overlap_genes}
+# get ven diagram folder name
+dataset_vd_dir <- dir_create(TRUE,deg_dir,paste0("degs_venn_diagrams"))
+dataset_upset_dir <- dir_create(TRUE,deg_dir,paste0("degs_upset_plots"))
+
+fontsize = NULL
+vd_plotlist = list()
+upset_plotlist = list()
+for (cell_type in names(cell_type_count_type_marker_list)) {
+    # we get the deg list for each cell type
+    count_type_marker_list = cell_type_count_type_marker_list[[cell_type]]
+
+    # generate plot only if there are more than one deg vector
+    if (length(count_type_marker_list) > 1) {
+        # upset plot 
+        g_set = unique(unlist(count_type_marker_list))
+
+        # make a dataframe where genes are rows and count types are columns
+        g_df = as.data.frame(matrix(0, nrow = length(g_set), ncol = length(count_type_marker_list)))
+        colnames(g_df) = names(count_type_marker_list)
+        rownames(g_df) = g_set
+
+        # then we fill in the dataframe using count_type_marker_list
+        for (count_type in names(count_type_marker_list)) {
+            g_df[rownames(g_df) %in% count_type_marker_list[[count_type]], count_type] = 1
+        }
+        upset_plotlist[[cell_type]] = upset(g_df, mainbar.y.label = paste0(cell_type,"\nIntersection Size"))
+        pdf(file.path(dataset_upset_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")))
+        print(upset_plotlist[[cell_type]])
+        dev.off()
+
+        # Venn diagram for USA, SA, U
+        # plot upset plot
+        # vd_set_name = c("USA", "SA", "U")[c("USA", "SA", "U") %in% names(count_type_marker_list)]
+        # if (length(vd_set_name) > 1) {
+        #     vd_plotlist[[cell_type]] = ggVennDiagram(
+        #         count_type_marker_list[vd_set_name],
+        #         color = "black",
+        #         lwd = 0.8,
+        #         lty = 1,
+        #         set_size = fontsize,
+        #         label_size = fontsize
+        #     ) +
+        #         scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") +
+        #         labs(title = cell_type) +
+        #         theme(legend.position = "none")
+            
+        #     pdf(file.path(dataset_vd_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")),width = 20,height = 10)
+        #     print(plotlist[[cell_type]])
+        #     dev.off()
+        # }
+    }
+}
+
+```
+
+
+
+
+

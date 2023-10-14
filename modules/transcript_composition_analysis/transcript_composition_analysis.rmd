@@ -1,0 +1,1157 @@
+---
+title: "Transcript Composition Analysis"
+author: "Dongze He, Steve M. Mount, and Rob Patro"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        code_folding: hide
+        fig_caption: true
+        self_contained: true
+
+params:
+    gtf_path: null
+    genome_path: null
+    out_dir: null
+    terminal_length: 1000
+    threads: 20
+    min_length: 6
+    max_mismatch: 0
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_library}
+suppressPackageStartupMessages({
+    library(BSgenome)
+    library(Biostrings)
+    library(GenomicFeatures)
+    library(GenomicRanges)
+    library(doParallel)
+})
+```
+## Introduction
+Single-cell RNA-seq (scRNA-seq) is a powerful tool for studying gene expression at the single-cell level. By design, the sequencing reads from droplet-based scRNA-seq protocols, such as 10x Genomics Chromium systems, should originate from the tail of spliced transcripts. However, recent studies have shown that a significant fraction of reads from 10x Genomics scRNA-seq data are derived outside from 3' tail of transcripts , such as intronic regions in unspliced transcripts. The consequence of this phenomenon is that, because both spliced and unspliced transcripts are the potential source of poly-A priming, and exons are shared by both spliced and unspliced transcripts, the splicing status of the transcript origin of exonic reads cannot be determined.
+
+To understand the effect of internal poly-A priming in scRNA-seq, one should first be able to understand the transcript structure, which is the origin of sequencing reads. In this analysis, we will answer the following questions.
+
+First, we want to ask the structure of the terminal kilobase of transcripts.
+1. How many exons do each transcript have?
+2. How many transcripts are single-exon transcripts?
+3. How many transcripts' terminal kilobase consits of 5' - (exon - intron)$times$n - exon - 3'?
+
+Then, we want to task the poly-As in the transcripts, both spliced and unspliced. For each transcript, we want to know:
+1. how many poly-A tracts are in the exons?
+2. how many poly-A tracts are in the introns?
+3. how many poly-A tracts are in the starting kilobase of the introns, so that the upstream exons can be primed because of that?
+
+Notice that we want to normalize the number of poly-A tracts by the length of the feature (exons or introns), so as to make the comparison between exons and introns meaningful.
+
+Frin this analysis, we want to draw the following conclusions:
+1. exons, and therefore spliced transcripts are always short and barely have internal poly-A tracts;
+2. introns, and therefore unspliced transcripts are always long and have internal poly-A tracts;
+3. it is rare to have exonic reads originated by the polyA tracts at the 5' end of introns.
+
+## Preprocessing
+
+
+```{r set_env}
+result_list = list()
+
+threads=min(params$threads,detectCores()-1)
+registerDoParallel(cores=threads)
+
+if (!dir.exists(params$out_dir)) {
+    dir.create(params$out_dir, recursive = TRUE,
+            showWarnings = FALSE)
+}
+# make sure gtf file exists
+if (!file.exists(params$gtf_path)) {
+    stop("The following file does not exist: \n", params$gtf_path)
+}
+# make sure fasta file exists
+if (!file.exists(params$genome_path)) {
+    stop("The following file does not exist: \n", params$genome_path)
+}
+
+```
+
+# Load genome and gtf
+
+We load the reference set: the genome and gtf files.
+```{r load_ref}
+# load genome
+genome <- Biostrings::readDNAStringSet(file.path(params$genome_path))
+# get the first word as the name
+names(genome) <- stringr::word(names(genome), 1)
+
+# load gene annotation
+txdb <- suppressWarnings(GenomicFeatures::makeTxDbFromGFF(params$gtf_path, format = "gtf"))
+```
+
+we get the exon ranges by transcript
+```{r get_tx_exons}
+# get exons by transcript
+ebt <- GenomicFeatures::exonsBy(txdb, by = "tx", use.names = TRUE)
+head(ebt)
+```
+
+we also want to get exon ranges by gene
+```{r get_gene_exons}
+# get exons by gene
+ebg <- GenomicFeatures::exonsBy(txdb, by = "gene")
+head(ebg)
+```
+
+we get the unspliced transcripts
+
+```{r get_unspliced_txs}
+# get transcripts' range(unspliced transcripts)
+txs <- GenomicFeatures::transcripts(txdb, use.names = TRUE, columns = c("tx_name", "gene_id"))
+head(txs)
+```
+
+we get the transcript to gene mapping
+```{r get_t2g_mapping}
+# get transcript to gene mapping
+t2g_df <- unique(data.frame(
+    S4Vectors::mcols(txs)[, c("tx_name", "gene_id")],
+    stringsAsFactors = FALSE
+))
+t2g_df$tx_name = as.character(t2g_df$tx_name)
+t2g_df$gene_id = as.character(t2g_df$gene_id)
+
+t2g = t2g_df$gene_id
+names(t2g) = t2g_df$tx_name
+
+head(t2g_df)
+```
+
+## The structure of the terminal kilobase of transcripts
+
+### How many exons do each transcript have?
+As the expected priming sites of poly-A priming in scRNA-seq are at the 3' end of transcripts, we want to have a close look at the terminal kilobase of transcripts. We want to know how many exons do each transcript have, and how many transcripts are single-exon transcripts.
+
+First, we want to get the number of exons for each transcript. This can help us to separate the transcripts into single-exon transcripts and multi-exon transcripts. 
+```{r get_exon_num}
+# get the number of exons per transcript
+batch_size=ceiling(length(ebt)/threads)
+
+result_list$tx_num_exons = foreach (batch_id=seq(1,length(ebt),by=batch_size), .combine=c, .inorder=TRUE) %dopar% {
+    batch = ebt[batch_id:min(batch_id+batch_size-1, length(ebt))]
+    sapply(batch, function(x) length(x))
+}
+
+hist(
+    result_list$tx_num_exons, 
+    xlim = c(0,quantile(result_list$tx_num_exons, 0.99)), 
+    breaks=100, 
+    main = "# of exons per transcript", 
+    xlab = "# of exons",
+    freq = FALSE
+)
+```
+
+To have a direct sense of the distribution, we count the transcripts that have a specific number of exons. Notice that there are `r length(result_list$tx_num_exons)` transcripts in total.
+
+```{r list_exon_num}
+exon_count_df = data.frame(
+    exon_count = sort(unique(result_list$tx_num_exons))
+)
+exon_count_df$tx_count = sapply(exon_count_df$exon_count, function(i) sum(result_list$tx_num_exons == i))
+exon_count_df$cumsum_tx_count = cumsum(exon_count_df$tx_count)
+exon_count_df$cumsum_tx_perc = round(exon_count_df$cumsum_tx_count/length(result_list$tx_num_exons),3)
+result_list$exon_count_df = exon_count_df
+head(exon_count_df, 10)
+```
+
+```{r hist_exon_count_df}
+plot(
+    exon_count_df$exon_count, 
+    exon_count_df$cumsum_tx_perc, 
+    main = "# of transcripts with at least n exons", 
+    xlab = "# of exons in a transcript", 
+    ylab = "Cumulative % of transcripts", 
+    type = "b"
+)
+```
+
+### How many transcripts are single-exon transcripts?
+
+As we can see, there is only `r exon_count_df[exon_count_df$exon_count == 1, "cumsum_tx_perc"] * 100`$%$ of transcripts are single-exon transcripts. Except of those transcripts, the rest of transcripts are multi-exon transcripts and may generate internal priming reads.
+
+### how long is the terminal exon of multi-exon transcripts?
+Knowing that almost all transcripts are multi-exon transcripts, we now want to know the distribution of end exon's length of those multi-exon transcripts. If we see that all end exons are long, we can probably say that reads that are compatible with the terminal kilobase of transcripts are probably originated from the 3' end of transcripts. If we see that some end exons are short, there is a chance that reads that are compatible with the terminal kilobase of transcripts are originated from the internal poly-A priming sites.
+
+```{r get_terminal_exon_length}
+# first we find the terminal exon of each transcript
+batch_size=ceiling(length(ebt)/threads)
+result_list$txs_last_exon = foreach (batch_id=seq(1,length(ebt),by=batch_size), .combine=c, .inorder=TRUE) %dopar% {
+    batch = ebt[batch_id:min(batch_id+batch_size-1, length(ebt))]
+    GRangesList(lapply(batch, function(x) x[length(x)]))
+}
+
+# then we compute the length of the terminal exon of each transcript
+batch_size=ceiling(length(ebt)/threads)
+result_list$txs_last_exon_length = foreach (batch_id=seq(1,length(result_list$txs_last_exon),by=batch_size), .combine=c, .inorder=TRUE) %dopar% {
+    batch = result_list$txs_last_exon[batch_id:min(batch_id+batch_size-1, length(result_list$txs_last_exon))]
+    sapply(batch, width)
+}
+
+# then we filter the multi-exon transcripts
+result_list$multiexon_txs_last_exon_length = result_list$txs_last_exon_length[names(result_list$tx_num_exons)[result_list$tx_num_exons > 1]]
+
+hist(result_list$multiexon_txs_last_exon_length, 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$multiexon_txs_last_exon_length, 0.99)), main = "length of the last exon of multi-exon transcripts",
+    xlab = "exon length",
+    freq = FALSE
+)
+```
+
+As we can see, most of the last exons are short, which means that the  reads compatible with the terminal kilobase of transcripts have the chance to be originated from the internal poly-A priming sites in introns. 
+
+Till now, we asked all the questions about the terminal kilobase of transcripts. We can conclude that because most transcripts are multi-exon transcripts, and the last exon of multi-exon transcripts are short, the reads that are compatible with the terminal kilobase of transcripts have the chance to be originated from the internal poly-A priming sites in introns.
+
+## Poly-A tracts in transcriptome
+Next, we will turn our attention to the poly-A tracts in transcripts, both spliced and unspliced. We want to know how many poly-A tracts are in the exons, how many poly-A tracts are in the introns, and how many poly-A tracts are in the starting kilobase of the introns, so that the upstream exons can be primed because of that.
+
+### How many poly-A tracts are in the exons?
+As the first step, we want to know how many poly-A tracts are in exons. To avoid processing every base multiple times, here we will collapse overlapping exons before processing.
+
+```{r get_exon_polyA_count}
+# get exon regions' sequence
+es = unique(unlist(ebg))
+exon_seqs = Biostrings::getSeq(genome, es)
+batch_size=ceiling(length(exon_seqs)/threads)
+
+result_list$exon_polya_count = foreach (batch_id=seq(1,length(exon_seqs),by=batch_size), .combine=rbind, .inorder=TRUE) %dopar% {
+    batch = exon_seqs[batch_id:min(batch_id+batch_size-1, length(exon_seqs))]
+        # get poly-A count
+        polya <- sapply(
+            Biostrings::vmatchPattern(
+                paste0(
+                    rep("A", params$min_length),
+                    collapse = ""
+                ),
+                batch,
+                max.mismatch = params$max_mismatch
+            ),
+            IRanges::reduce
+        )
+        # get poly-A count
+        polyt <- sapply(
+            Biostrings::vmatchPattern(
+                paste0(
+                    rep("T", params$min_length),
+                    collapse = ""
+                ),
+                batch,
+                max.mismatch = params$max_mismatch
+            ),
+            IRanges::reduce
+        )
+        data.frame(
+            polya_count = sapply(polya, length),
+            polyt_count = sapply(polyt, length),
+            seq_length = width(batch),
+            stringsAsFactors = FALSE
+        )
+}
+
+head(result_list$exon_polya_count)
+```
+
+First of all, let's have a basic idea of how many poly-A tracts are in exons.
+
+``` {r table_exon_polya_count}
+tb = table(result_list$exon_polya_count$polya_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polya = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Also, let's see how many poly-T tracts are in exons.
+
+``` {r table_exonic_polyt_count}
+tb = table(result_list$exon_polya_count$polyt_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polyt = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+There are `r sum(rowSums(result_list$exon_polya_count[,c(1,2)]) == 0)` out of `r nrow(result_list$exon_polya_count)` (`r round(sum(rowSums(result_list$exon_polya_count[,c(1,2)]) == 0)/nrow(result_list$exon_polya_count) * 100, 2)`%) exons with no poly-A/T tracts.
+
+```{r hist_exon_polya_count}
+par(mfrow = c(2,2))
+
+hist(
+    result_list$exon_polya_count$polya_count[result_list$exon_polya_count$polya_count != 0], 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$exon_polya_count$polya_count, 0.99)),
+    main = "exonic poly-A count (zero filtered)",
+    xlab = "poly-A count",
+    freq = FALSE
+)
+
+hist(
+    result_list$exon_polya_count$polyt_count[result_list$exon_polya_count$polyt_count != 0], 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$exon_polya_count$polyt_count, 0.99)), 
+    main = "exonic poly-T count (zero filtered)",
+    xlab = "poly-T count",
+    freq = FALSE
+)
+
+par(mfrow = c(1,1))
+```
+
+We also want to see if exon length decides the polyA count in exons.
+
+```{r t_test_exon_polya_count_vs_length}
+ids = rowSums(result_list$exon_polya_count[,c(1,2)])== 0
+t.test(result_list$exon_polya_count[ids, "polya_count"],result_list$exon_polya_count[ids, "seq_length"])
+
+```
+
+it is obvious that the mean of the two distributions are different, so we can say that exon length is positively correlated with the polyA count in exons.
+
+### How many poly-A tracts are in the introns?
+As the first step, we want to know how many poly-A tracts are in introns. To avoid processing every base multiple times, here we will collapse overlapping introns before processing.
+
+```{r get_intron_polyA_count}
+# first we get the introns of transcripts
+ebt_range <- range(ebt)
+ibt <- BiocGenerics::setdiff(ebt_range, ebt)
+
+# get intron regions' sequence
+introns = unique(unlist(ibt))
+intron_seqs = Biostrings::getSeq(genome, introns)
+batch_size=ceiling(length(intron_seqs)/threads)
+
+result_list$intronic_polya_count = foreach (batch_id=seq(1,length(intron_seqs),by=batch_size), .combine=rbind, .inorder=TRUE) %dopar% {
+    batch = intron_seqs[batch_id:min(batch_id+batch_size-1, length(intron_seqs))]
+        # get poly-A count
+        polya <- sapply(
+            Biostrings::vmatchPattern(
+                paste0(
+                    rep("A", params$min_length),
+                    collapse = ""
+                ),
+                batch,
+                max.mismatch = params$max_mismatch
+            ),
+            IRanges::reduce
+        )
+        # get poly-A count
+        polyt <- sapply(
+            Biostrings::vmatchPattern(
+                paste0(
+                    rep("T", params$min_length),
+                    collapse = ""
+                ),
+                batch,
+                max.mismatch = params$max_mismatch
+            ),
+            IRanges::reduce
+        )
+        data.frame(
+            polya_count = sapply(polya, length),
+            polyt_count = sapply(polyt, length),
+            seq_length = width(batch),
+            stringsAsFactors = FALSE
+        )
+}
+
+head(result_list$intronic_polya_count)
+```
+
+First of all, let's have a basic idea of how many poly-A tracts are in introns.
+
+``` {r table_intronic_polya_count}
+tb = table(result_list$intronic_polya_count$polya_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polya = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Also, let's see how many poly-T tracts are in introns.
+
+There are `r sum(rowSums(result_list$intronic_polya_count[,c(1,2)]) == 0)` out of `r nrow(result_list$intronic_polya_count)` (`r round(sum(rowSums(result_list$intronic_polya_count[,c(1,2)]) == 0)/nrow(result_list$intronic_polya_count) * 100, 2)`%) introns with no poly-A/T tracts.
+
+``` {r table_intronic_polyt_count}
+tb = table(result_list$intronic_polya_count$polyt_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polyt = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+```{r hist_intronic_polya_count}
+par(mfrow = c(2,2))
+
+hist(
+    result_list$intronic_polya_count$polya_count[result_list$intronic_polya_count$polya_count != 0], 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$intronic_polya_count$polya_count, 0.99)),
+    main = "intronic poly-A count (zero filtered)",
+    xlab = "poly-A count",
+    freq = FALSE
+)
+
+hist(
+    result_list$intronic_polya_count$polyt_count[result_list$intronic_polya_count$polyt_count != 0], 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$intronic_polya_count$polyt_count, 0.99)), 
+    main = "intronic poly-T count (zero filtered)",
+    xlab = "poly-T count",
+    freq = FALSE
+)
+
+par(mfrow = c(1,1))
+```
+
+We also want to see if intron length decides the polyA count in introns.
+
+```{r t_test_tx_polyA_count_vs_length}
+ids = rowSums(result_list$intronic_polya_count[,c(1,2)])== 0
+t.test(result_list$intronic_polya_count[ids,"polya_count"],result_list$intronic_polya_count[rowSums(result_list$intronic_polya_count[,c(1,2)])== 0, "seq_length"])
+
+```
+
+it is obvious that the mean of the two distributions are different, so we can say that intron length is positively correlated with the polyA count in introns.
+
+
+### How many poly-A tracts are in the transcripts?
+The poly-A tract count of exons is not exactly that of transcripts. This time we want to get the poly-A tract count of transcripts.
+
+For spliced transcripts, we can extract sequence of transcripts' exons and count the poly-A tracts in the sequences. For unspliced transcripts, we can extract sequence of transcripts' regions and count the poly-A tracts in the sequences.
+
+First, let's get the exon count of spliced transcripts.
+```{r get_spliced_txs_polya_count}
+spliced_tx_seqs = GenomicFeatures::extractTranscriptSeqs(genome, ebt)
+batch_size=ceiling(length(spliced_tx_seqs)/threads)
+
+result_list$spliced_txs_polya_count = foreach (batch_id=seq(1,length(spliced_tx_seqs),by=batch_size), .combine=rbind, .inorder=TRUE) %dopar% {
+    batch = spliced_tx_seqs[batch_id:min(batch_id+batch_size-1, 
+                                        length(spliced_tx_seqs))]
+    # get poly-A count
+    polya <- sapply(
+        Biostrings::vmatchPattern(
+            paste0(
+                rep("A", params$min_length),
+                collapse = ""
+            ),
+            batch,
+            max.mismatch = params$max_mismatch
+        ),
+        IRanges::reduce
+    )
+    # get poly-A count
+    polyt <- sapply(
+        Biostrings::vmatchPattern(
+            paste0(
+                rep("T", params$min_length),
+                collapse = ""
+            ),
+            batch,
+            max.mismatch = params$max_mismatch
+        ),
+        IRanges::reduce
+    )
+    data.frame(
+        polya_count = sapply(polya, length),
+        polyt_count = sapply(polyt, length),
+        seq_length = width(batch),
+        stringsAsFactors = FALSE
+    )
+}
+
+head(result_list$spliced_txs_polya_count)
+```
+
+There are `r sum(rowSums(result_list$spliced_txs_polya_count[,c(1,2)]) == 0)` out of `r nrow(result_list$spliced_txs_polya_count)` (`r round(sum(rowSums(result_list$spliced_txs_polya_count[,c(1,2)]) == 0)/nrow(result_list$spliced_txs_polya_count) * 100, 2)`%) spliced transcripts with no poly-A/T tracts.
+
+First of all, let's have a basic idea of how many poly-A tracts are in exons.
+
+``` {r table_spliced_txs_polya_count}
+tb = table(result_list$spliced_txs_polya_count$polya_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polya = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Also, let's see how many poly-T tracts are in exons.
+
+``` {r table_spliced_txs_polyt_count}
+tb = table(result_list$spliced_txs_polya_count$polyt_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polyt = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Then let see the distribution of poly-A count in spliced transcripts.
+
+```{r hist_spliced_tx_polyA_count}
+par(mfrow = c(2,1))
+
+hist(
+    result_list$spliced_txs_polya_count$polya_count, 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$spliced_txs_polya_count$polya_count, 0.99)), 
+    main = "poly-A count of spliced transcripts",
+    xlab = "poly-A count",
+    freq = FALSE
+)
+
+hist(
+    result_list$spliced_txs_polya_count$polyt_count, 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$spliced_txs_polya_count$polyt_count, 0.99)), 
+    main = "poly-T count of spliced transcripts",
+    xlab = "poly-T count",
+    freq = FALSE
+)
+
+par(mfrow = c(1,1))
+```
+
+We want to do the same thing for unspliced transcripts.
+
+```{r get_unspliced_txs_polya_count}
+unspliced_tx_seqs = getSeq(genome, txs)
+batch_size=ceiling(length(unspliced_tx_seqs)/threads)
+
+result_list$unspliced_txs_polya_count = foreach (batch_id=seq(1,length(unspliced_tx_seqs),by=batch_size), .combine=rbind, .inorder=TRUE) %dopar% {
+    batch = unspliced_tx_seqs[batch_id:min(batch_id+batch_size-1, length(unspliced_tx_seqs))]
+        # get poly-A count
+        polya <- sapply(
+            Biostrings::vmatchPattern(
+                paste0(
+                    rep("A", params$min_length),
+                    collapse = ""
+                ),
+                batch,
+                max.mismatch = params$max_mismatch
+            ),
+            IRanges::reduce
+        )
+        # get poly-A count
+        polyt <- sapply(
+            Biostrings::vmatchPattern(
+                paste0(
+                    rep("T", params$min_length),
+                    collapse = ""
+                ),
+                batch,
+                max.mismatch = params$max_mismatch
+            ),
+            IRanges::reduce
+        )
+        data.frame(
+            polya_count = sapply(polya, length),
+            polyt_count = sapply(polyt, length),
+            seq_length = width(batch),
+            stringsAsFactors = FALSE
+        )
+}
+
+head(result_list$unspliced_txs_polya_count)
+```
+
+There are `r sum(rowSums(result_list$unspliced_txs_polya_count[,c(1,2)]) == 0)` out of `r nrow(result_list$unspliced_txs_polya_count)` (`r round(sum(rowSums(result_list$unspliced_txs_polya_count[,c(1,2)]) == 0)/nrow(result_list$unspliced_txs_polya_count) * 100, 2)`%) unspliced transcripts with no poly-A/T tracts.
+
+First of all, let's have a basic idea of how many poly-A tracts are in exons.
+
+``` {r table_unspliced_txs_polya_count}
+tb = table(result_list$unspliced_txs_polya_count$polya_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polya = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Also, let's see how many poly-T tracts are in exons.
+
+``` {r table_unspliced_txs_polyt_count}
+tb = table(result_list$unspliced_txs_polya_count$polyt_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polyt = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Then let see the distribution of poly-A count in unspliced transcripts.
+
+```{r hist_unspliced_tx_polyA_count}
+par(mfrow = c(2,1))
+
+hist(
+    result_list$unspliced_txs_polya_count$polya_count, 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$unspliced_txs_polya_count$polya_count, 0.99)), 
+    main = "poly-A count of unspliced transcripts",
+    xlab = "poly-A count",
+    freq = FALSE
+)
+
+hist(
+    result_list$unspliced_txs_polya_count$polyt_count, 
+    breaks=200, xlim = c(0,quantile(result_list$unspliced_txs_polya_count$polyt_count, 0.99)), 
+    main = "poly-T count of unspliced transcripts",
+    xlab = "poly-T count",
+    freq = FALSE
+)
+
+par(mfrow = c(1,1))
+```
+
+Although we see that unspliced transcripts usually have many more poly-A tracts than their spliced counterpart, we want to see if this is caused by the structural difference of unspliced and spliced transcripts, or by the length difference of them.
+
+```{r plot_tx_polyA_count}
+spliced_txs_polya_count_normalized = result_list$spliced_txs_polya_count$polya_count/result_list$spliced_txs_polya_count$seq_length
+unspliced_txs_polya_count_normalized = result_list$unspliced_txs_polya_count$polya_count/result_list$unspliced_txs_polya_count$seq_length
+```
+
+Then we apply a t test to quickly see if the mean of the two distributions are different.
+
+```{r t_test_spliced_unspliced_tx_polyA_count}
+t.test(spliced_txs_polya_count_normalized, unspliced_txs_polya_count_normalized)
+
+```
+
+wilcoxon test
+```{r wilcoxon_test_tx_polyA_count}
+wilcox.test(spliced_txs_polya_count_normalized, unspliced_txs_polya_count_normalized)
+
+```
+
+As we can see, the mean of the two distributions are different, so we can say that both the length difference and the the structural difference of unspliced and spliced transcripts are the reasons that unspliced transcripts usually have many more poly-A tracts than their spliced counterpart.
+
+### How many poly-A tracts are in the 5' terminal kilobase of introns?
+
+There is still one thing not clear to us: When we see exonic reads, is this possible that they are caused by priming the poly-A tracts in the 5' terminal kilobase of introns? To answer this question, we want to know how many poly-A tracts are in the 5' terminal kilobase of introns.
+
+1. we get the 5' terminal kilobase of introns
+2. we get the poly-A count in the 5' terminal kilobase of introns
+
+```{r get_intron_5p_polyA_count}
+# we want to filter single-exon transcripts bc they do not have intron
+ibt = ibt[result_list$tx_num_exons > 1]
+ibt_5p <- flank(ibt, -1000)
+
+seqlevels(ibt_5p) <- seqlevels(genome)
+seqlengths(ibt_5p) <- suppressWarnings(seqlengths(genome))
+ibt_5p <- trim(ibt_5p)
+
+intron_5p_seqs = Biostrings::getSeq(genome, ibt_5p)
+
+batch_size=ceiling(length(intron_5p_seqs)/threads)
+
+result_list$intron_5p_polyA_count = foreach (batch_id=seq(1,length(intron_5p_seqs),by=batch_size), .combine=rbind, .inorder=TRUE) %dopar% {
+    batch = intron_5p_seqs[batch_id:min(batch_id+batch_size-1, 
+                                        length(intron_5p_seqs))]
+    # get poly-A count
+    polya <- sapply(
+        batch,
+        function(x) {
+            sum(sapply(
+                Biostrings::vmatchPattern(
+                    paste0(
+                        rep("A", params$min_length),
+                        collapse = ""
+                    ),
+                    x,
+                    max.mismatch = params$max_mismatch
+                ),
+                function(y) length(IRanges::reduce(y))
+            ))
+        }
+    )
+    polyt <- sapply(
+        batch, 
+        function(x) {
+            sum(sapply(
+                Biostrings::vmatchPattern(
+                    paste0(
+                        rep("T", params$min_length),
+                        collapse = ""
+                    ),
+                    x,
+                    max.mismatch = params$max_mismatch
+                ),
+                function(y) length(IRanges::reduce(y))
+            ))
+        }
+    )
+    data.frame(
+        polya_count = polya,
+        polyt_count = polyt,
+        stringsAsFactors = FALSE
+    )
+}
+
+head(result_list$intron_5p_polyA_count)
+```
+
+There are `r sum(rowSums(result_list$intron_5p_polyA_count[,c(1,2)]) == 0)` out of `r nrow(result_list$intron_5p_polyA_count)` (`r round(sum(rowSums(result_list$intron_5p_polyA_count[,c(1,2)]) == 0)/nrow(result_list$intron_5p_polyA_count) * 100, 2)`%) introns with no poly-A and poly-T tracts in the 5' terminal kilobase.
+
+
+First of all, let's have a basic idea of how many poly-A tracts are there.
+
+``` {r table_intron_5p_polyA_count}
+tb = table(result_list$intron_5p_polyA_count$polya_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polya = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Also, let's see how many poly-T tracts are in exons.
+
+``` {r table_intron_5p_polyT_count}
+tb = table(result_list$intron_5p_polyA_count$polyt_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polyt = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Then let see the distribution of poly-A count in introns.
+
+```{r hist_intron_5p_polyA_count}
+par(mfrow = c(2,1))
+
+hist(
+    result_list$intron_5p_polyA_count$polya_count, 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$intron_5p_polyA_count$polya_count, 0.99)), 
+    main = "poly-A count in the 5' end of introns",
+    xlab = "poly-A count",
+    freq = FALSE
+)
+
+hist(
+    result_list$intron_5p_polyA_count$polyt_count, 
+    breaks=200, 
+    xlim = c(0,quantile(result_list$intron_5p_polyA_count$polyt_count, 0.99)), 
+    main = "poly-T count in the 5' end of introns",
+    xlab = "poly-T count",
+    freq = FALSE
+)
+
+par(mfrow = c(1,1))
+```
+
+From the dataframe we can see that we have a lot of poly-A tracts in the 5' terminal kilobase of introns. This means that it is possible that exonic reads are caused by priming the poly-A tracts in the 5' terminal kilobase of introns.
+
+Now we know that exonic reads can be caused by priming the poly-A tracts in the 5' terminal kilobase of introns. However, does this apply to all exons? Can we at least say that if we see exonic reads that map to the terminal kilboase of transcripts, then they are caused by priming the poly-A tail of transcripts? To answer this question, we want to find the exons that forms the terminal kilobase of transcripts, and see if there are poly-A tracts in the introns that are in between of these exons.
+
+
+First, we need to get the exon ranges of the terminal kilobase of transcripts. We can do this by getting the 5' terminal kilobase of transcripts, and then get the exons that overlap with the 5' terminal kilobase of transcripts.
+
+```{r get_tx_terminal_ebt}
+batch_size=ceiling(length(ebt)/threads)
+
+result_list$tx_terminal_ebt = foreach (batch_id=seq(1,length(ebt),by=batch_size), .combine=c) %dopar% {
+    batch = ebt[batch_id:min(batch_id+batch_size-1, length(ebt))]
+    GRangesList(lapply(batch, function(e) {
+        # sort exons in the reverse order
+        e=BiocGenerics::sort(e, by=~exon_rank, decreasing=TRUE)
+        cum_sum_width=cumsum(width(e))
+        terminal_e = if (tail(cum_sum_width, n=1) <= params$terminal_length) {
+            e
+        } else if (is.element(params$terminal_length,cum_sum_width)) {
+            e[0:which(cum_sum_width == params$terminal_length)]
+        } else  {
+            bound_idx=sum(cum_sum_width <= params$terminal_length)
+            bound_e=e[bound_idx+1]
+            w_before_bound= if (bound_idx > 0) {
+                cum_sum_width[bound_idx]
+            } else {
+                0
+            }
+            # get the 5' according to strand
+            if (as.character(strand(bound_e)) == "+") {
+                # [start, total length - cum length -1] we need to -1 because its both inclusive 
+                BiocGenerics::start(bound_e) = BiocGenerics::end(bound_e) - (params$terminal_length - w_before_bound - 1)
+            } else {
+                BiocGenerics::end(bound_e) = BiocGenerics::start(bound_e) + (params$terminal_length - w_before_bound - 1)
+            }
+            c(e[0:bound_idx], bound_e)
+        }
+
+        BiocGenerics::sort(terminal_e, by=~exon_rank, decreasing=FALSE)
+    }))
+}
+
+head(result_list$tx_terminal_ebt)
+```
+
+Let's visualize the exon count of the terminal kilobase of transcripts.
+
+```{r hist_tx_terminal_ebt}
+# get the number of exons per transcript
+batch_size=ceiling(length(result_list$tx_terminal_ebt)/threads)
+
+result_list$tx_terminal_num_exons = foreach (batch_id=seq(1,length(result_list$tx_terminal_ebt),by=batch_size), .combine=c, .inorder=TRUE) %dopar% {
+    batch = result_list$tx_terminal_ebt[batch_id:min(batch_id+batch_size-1, length(result_list$tx_terminal_ebt))]
+    sapply(batch, function(x) length(x))
+}
+
+hist(
+    result_list$tx_terminal_num_exons, 
+    # xlim = c(0,quantile(result_list$tx_terminal_num_exons, 0.99)), 
+    breaks=100, 
+    main = "# of exons in the terminal kilobase per transcript", 
+    xlab = "# of exons",
+    freq = FALSE
+)
+```
+
+Then, we get the introns associated with those terminal exons.
+
+```{r get_tx_terminal_ibt}
+tx_terminal_ebt_range <- range(result_list$tx_terminal_ebt)
+result_list$tx_terminal_ibt <- BiocGenerics::setdiff(tx_terminal_ebt_range, result_list$tx_terminal_ebt)
+
+head(result_list$tx_terminal_ibt)
+```
+
+Then, we want to get the poly-A count in the introns that are in between of these exons.
+
+```{r get_tx_terminal_ibt_polyA_count}
+ibt_5p <- GenomicRanges::flank(result_list$tx_terminal_ibt, -1000)
+
+seqlevels(ibt_5p) <- seqlevels(genome)
+seqlengths(ibt_5p) <- suppressWarnings(seqlengths(genome))
+ibt_5p <- trim(ibt_5p)
+
+# we filter the empty entries
+intron_index = foreach (batch_id=seq(1,length(ibt_5p),by=batch_size), .combine=c, .inorder=TRUE) %dopar% {
+    batch = ibt_5p[batch_id:min(batch_id+batch_size-1, length(ibt_5p))]
+    sapply(batch, function(x) length(x) > 0, USE.NAMES = FALSE)
+}
+
+ibt_5p = ibt_5p[intron_index]
+
+# get the sequence of the records
+intron_5p_seqs = Biostrings::getSeq(genome, ibt_5p)
+
+batch_size=ceiling(length(intron_5p_seqs)/threads)
+
+result_list$tx_terminal_intron_5p_polyA_count = foreach (batch_id=seq(1,length(intron_5p_seqs),by=batch_size), .combine=rbind, .inorder=TRUE) %dopar% {
+    batch = intron_5p_seqs[batch_id:min(batch_id+batch_size-1, 
+                                        length(intron_5p_seqs))]
+    # get poly-A count
+    polya <- sapply(
+        batch,
+        function(x) {
+            sum(sapply(
+                Biostrings::vmatchPattern(
+                    paste0(
+                        rep("A", params$min_length),
+                        collapse = ""
+                    ),
+                    x,
+                    max.mismatch = params$max_mismatch
+                ),
+                function(y) length(IRanges::reduce(y))
+            ))
+        }
+    )
+    polyt <- sapply(
+        batch, 
+        function(x) {
+            sum(sapply(
+                Biostrings::vmatchPattern(
+                    paste0(
+                        rep("T", params$min_length),
+                        collapse = ""
+                    ),
+                    x,
+                    max.mismatch = params$max_mismatch
+                ),
+                function(y) length(IRanges::reduce(y))
+            ))
+        }
+    )
+    data.frame(
+        polya_count = polya,
+        polyt_count = polyt,
+        stringsAsFactors = FALSE
+    )
+}
+
+head(result_list$tx_terminal_intron_5p_polyA_count)
+```
+
+There are `r sum(rowSums(result_list$tx_terminal_intron_5p_polyA_count[,c(1,2)]) == 0)` out of `r nrow(result_list$tx_terminal_intron_5p_polyA_count)` (`r round(sum(rowSums(result_list$tx_terminal_intron_5p_polyA_count[,c(1,2)]) == 0)/nrow(result_list$tx_terminal_intron_5p_polyA_count) * 100, 2)`%) introns with no poly-A tracts in the 5' terminal kilobase.
+
+
+First of all, let's have a basic idea of how many poly-A tracts are there.
+
+``` {r table_tx_terminal_intron_5p_polyA_count}
+tb = table(result_list$tx_terminal_intron_5p_polyA_count$polya_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polya = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Also, let's see how many poly-T tracts are in exons.
+
+``` {r table_tx_terminal_intron_5p_polyT_count}
+tb = table(result_list$tx_terminal_intron_5p_polyA_count$polyt_count)
+tb_name = names(tb)
+tb = c(tb[1:11], sum(tb[12:length(tb)]))
+names(tb) = c(tb_name[1:11], paste0(tb_name[12], "+"))
+data.frame(
+    num_polyt = names(tb),
+    count = c(tb), 
+    proportion = round(c(tb/sum(tb)), 5)
+)
+```
+
+Then let see the distribution of poly-A count.
+
+```{r hist_tx_terminal_intron_5p_polyA_count}
+par(mfrow = c(2,1))
+
+hist(
+    result_list$tx_terminal_intron_5p_polyA_count$polya_count, 
+    # breaks=200, 
+    xlim = c(0,quantile(result_list$tx_terminal_intron_5p_polyA_count$polya_count, 0.99)), 
+    main = "intronic poly-A count in the 5' end of tx terminal introns",
+    xlab = "poly-A count",
+    freq = FALSE
+)
+
+hist(
+    result_list$tx_terminal_intron_5p_polyA_count$polyt_count, 
+    # breaks=200, 
+    xlim = c(0,quantile(result_list$tx_terminal_intron_5p_polyA_count$polyt_count, 0.99)), 
+    main = "intronic poly-T count in the 5' end of tx terminal introns",
+    xlab = "poly-A count",
+    freq = FALSE
+)
+
+par(mfrow = c(1,1))
+```
+
+So, there are `r sum(rowSums(result_list$tx_terminal_intron_5p_polyA_count[, c(1,2)]) == 0)` (`r round(sum(rowSums(result_list$tx_terminal_intron_5p_polyA_count[, c(1,2)]) == 0)/nrow(result_list$tx_terminal_intron_5p_polyA_count)*100, 2)` $%$) out of `r nrow(result_list$tx_terminal_intron_5p_polyA_count)` terminal introns that do not have poly-A tracts in the 5' terminal kilobase. This means that if we see exonic reads that map to the terminal kilboase of transcripts, then can be caused by priming the poly-A tail of transcripts.
+
+```{r}
+sum(rowSums(result_list$tx_terminal_intron_5p_polyA_count[, c(1,2)]) == 0)
+```
+
+## Conclusions
+In this analysis, we explored the frequency of internal poly-A tracts in the transcriptome. We found that:
+
+1. Introns, and therefore unspliced transcripts are always long and have internal poly-A tracts;
+2. Exons, and therefore spliced transcripts have internal poly-A tracts, but they tend to have less poly-A tracts than introns;
+3. Most transcripts are multi-exon transcripts, and the terminal kilobase of transcripts usually are formed by multiple exons.
+4. There are poly-A tracts in the 5' terminal kilobase of introns, so that exonic reads that map to exons can be caused by priming the polyA tracts in the 5' end of the downstream introns. This conclusion applies to all introns, including those between the exons that consist of the terminal kilobase of transcripts. 
+
+
+Finally, we write the results we computed into the output directory `r params$out_dir`.
+
+```{r write_results}
+saveRDS(result_list, file.path(params$out_dir, "tx_structure_analysis.rds"))
+```
+
+```{r session_info}
+sessionInfo()
+```
+
+## Extra section: Prepare data for the read alignment analysis
+In the read alignment analysis, we will explore the read alignments falling in the following 5 categories:
+1. The exon-exon junctions of spliced transcripts,
+2. The intron-exon and exon-intron junctions of unspliced transcripts, 
+3. The 3$^\prime$ terminal exon of transcripts
+4. the 3$^\prime$ terminal kilobase of spliced transcripts 
+5. the 3$^\prime$ terminal kilobase of unspliced transcripts, 
+6. exons
+7. introns
+
+```{r}
+library(rtracklayer)
+bed_dir = file.path(params$out_dir, "feature_category_bed")
+dir.create(bed_dir, recursive = TRUE,
+            showWarnings = FALSE)
+```
+
+### intron exon junction
+
+We can get the intron-exon (exon-intron) junctions from the exon ranges of transcripts
+
+```{r get_intron_exon_junctions}
+# get the intron-exon junctions
+is = unique(unlist(ibt))
+
+# get the intron-exon junctions
+# those junctions start from the last two bases before each exon, and end at the first two bases of the exon
+ei_junction = resize(flank(is, 3), 6, fix = "start")
+
+# get the exon-intron junctions
+# those junctions start from the last two bases of each exon, and end at the first two bases after the exon
+ie_junction = resize(flank(is, 3, start = FALSE), 6, fix = "end")
+
+# write the intron-exon junctions to a BED file
+export.bed(sort(unique(c(ie_junction, ei_junction))),con=file.path(bed_dir, "exon_intron_junctions.bed"))
+```
+
+### exon start and end site
+
+we get the exons' start and end site to help filter exon-exon junction reads
+
+```{r get_exon_start_end_site}
+e_end = flank(is, 2, start = TRUE)
+export.bed(sort(unique(e_end)),con=file.path(bed_dir, "exons_end_site.bed"))
+
+e_start = flank(is, 2, start = FALSE)
+export.bed(sort(unique(e_start)),con=file.path(bed_dir, "exons_start_site.bed"))
+```
+
+### 3' terminal exon
+
+We have already got the 3' terminal exon of transcripts in the previous section. We can write it to a BED file.
+
+```{r write_3p_terminal_exon}
+terminal_e = unique(unlist(result_list$txs_last_exon))
+# write the intron-exon junctions to a BED file
+export.bed(sort(terminal_e),con=file.path(bed_dir, "transcripts_terminal_exon.bed"))
+```
+
+### 3' terminal kilobase of spliced transcripts
+
+This category needs two files, the exons features that are in the 3' terminal kilobase of spliced transcripts, and the range of those exon features. We have already got the exon features in the previous section. We can get the range of those exon features easily by the `range` function
+
+```{r get_3p_terminal_kilobase_spliced_txs}
+# write terminal kilobase exons to a BED file
+terminal_es = unique(unlist(result_list$tx_terminal_ebt))
+export.bed(sort(terminal_es),con=file.path(bed_dir, "spliced_transcripts_terminal_kilobase_exons.bed"))
+
+# write the terminal kilobase exons' ranges to a BED file
+export.bed(sort(unique(range(result_list$tx_terminal_ebt))),con=file.path(bed_dir, "spliced_transcripts_terminal_kilobase_exons_range.bed"))
+```
+
+### 3' terminal kilobase of unspliced transcripts
+We can get the 3' terminal kilobase of unspliced transcripts by first getting the transcripts' range, and then take only the 3' terminal kilobase of the transcripts' range.
+
+```{r get_3p_terminal_kilobase_unspliced_txs}
+# we first find the transcripts that are shorter than 1000 bp
+short_txs = txs[width(txs) < 1000]
+
+# then we get the 3' terminal kilobase of long transcripts
+terminal_kilobase_long_txs = resize(txs[width(txs) >= 1000], 1000, fix = "end") 
+
+# assemble them together to get the complete set 
+terminal_kilobase_u = unique(c(short_txs, terminal_kilobase_long_txs))
+
+# write it out
+export.bed(sort(terminal_kilobase_u),con=file.path(bed_dir, "unspliced_transcripts_terminal_kilobase.bed"))
+```
+
+### exons
+
+```{r get_exons}
+# get exons
+es = unique(unlist(ebt))
+
+export.bed(sort(es),con=file.path(bed_dir, "exons.bed"))
+
+```
+
+### introns
+
+```{r get_introns}
+# first we get the introns of transcripts
+ebt_range <- range(ebt)
+is <- unique(unlist(BiocGenerics::setdiff(ebt_range, ebt)))
+
+export.bed(sort(is),con=file.path(bed_dir, "introns.bed"))
+
+```
+
+
+### genes
+
+```{r get_genes}
+# first we get the introns of transcripts
+gs <- genes(txdb)
+
+export.bed(sort(gs),con=file.path(bed_dir, "genes.bed"))
+
+gtf_df = read.table(file.path(params$gtf_path), header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+gene_attrs = gtf_df[gtf_df$V3 == "gene","V9"]
+
+protein_coding_gene_attrs = gene_attrs[sapply(gene_attrs, function(s) grepl("protein_coding", s, fixed = TRUE), USE.NAMES = FALSE)]
+
+protein_coding_genes = sapply(protein_coding_gene_attrs, function(s) {
+    strsplit(strsplit(s, "gene_id ")[[1]][2], ";")[[1]][1]
+}, USE.NAMES = FALSE)
+
+export.bed(sort(gs[protein_coding_genes]), con=file.path(bed_dir, "protein_coding_genes.bed"))
+```
+
+
+
+
+
+
+

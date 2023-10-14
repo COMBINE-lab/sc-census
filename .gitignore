@@ -1,0 +1,8 @@
+data
+nextflow
+.nextflow
+.nextflow.*
+pipeline_trace*
+workflow_output
+work
+conda_envs

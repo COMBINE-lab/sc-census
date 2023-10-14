@@ -1,0 +1,6 @@
+species,ref_name,genome_path,gtf_path
+human,refdata-gex-GRCh38-2020-A,data/refs/refdata-gex-GRCh38-2020-A/fasta/genome.fa,data/refs/refdata-gex-GRCh38-2020-A/genes/genes.gtf
+human,pool_lab_human,data/refs/refdata-gex-GRCh38-2020-A/fasta/genome.fa,data/refs/human_GRCh38_optimized_annotation_v2.gtf
+mouse,refdata-gex-mm10-2020-A,data/refs/refdata-gex-mm10-2020-A/fasta/genome.fa,data/refs/refdata-gex-mm10-2020-A/genes/genes.gtf
+mouse,pool_lab_mouse,data/refs/refdata-gex-mm10-2020-A/fasta/genome.fa,data/refs/mouse_mm10_optimized_annotation_v2.gtf
+
