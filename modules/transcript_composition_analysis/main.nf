@@ -5,8 +5,8 @@ workflow transcript_composition_analysis {
       .splitCsv(header:true, sep: ",", strip: true)
       .map{ row-> tuple(row.species,
                         row.ref_name,
-                        row.genome_path,
-                        row.gtf_path)
+                        "${projectDir}/${row.genome_path}",
+                        "${projectDir}/${row.gtf_path}")
       }
     r_transcript_composition_analysis(refs)
 
@@ -16,7 +16,7 @@ workflow transcript_composition_analysis {
 
 process r_transcript_composition_analysis {
     label 'r'
-    publishDir "${params.output_dir}/transcript_composition_analysis", mode: 'copy', pattern: "${ref_name}"
+    publishDir "${params.output_dir}/transcript_composition_analysis", mode: 'symlink', pattern: "${ref_name}"
     input:
         tuple val(species),
             val(ref_name),

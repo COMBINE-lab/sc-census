@@ -101,8 +101,8 @@ pyplot.title("".join(["The compatible feature categories of Reads (Total # of re
 pyplot.savefig(os.path.join(fig_dir , "read_category_upsetplot.pdf"))
 
 pickle.dump(cb_umi_dict, open(os.path.join(args.out_dir, "cb-umi_dict.pickle"), "wb"))
-pickle.dump(cat_cbumi_dict, open(os.path.join(args.out_dir, "cat-cbumi_dict.pickle"), "wb"))
-pickle.dump(cat_read_dict, open(os.path.join(args.out_dir, "cat-read_dict.pickle"), "wb"))
+# pickle.dump(cat_cbumi_dict, open(os.path.join(args.out_dir, "cat-cbumi_dict.pickle"), "wb"))
+# pickle.dump(cat_read_dict, open(os.path.join(args.out_dir, "cat-read_dict.pickle"), "wb"))
 
 
 

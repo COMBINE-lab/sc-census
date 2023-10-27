@@ -1,0 +1,17 @@
+name: PY
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - pysam
+  - scipy
+  - pandas
+  - upsetplot
+  - matplotlib
+  - celltypist
+  - leidenalg
+  - python-igraph
+  - pyroe
+  - pip
+  - pip:
+    - scanpy

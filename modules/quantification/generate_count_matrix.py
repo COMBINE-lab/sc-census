@@ -19,10 +19,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("in_bam", help="input bam file", type=str)
 parser.add_argument("in_tsv", help="input read_name-closest_peak-distance tsv file", type=str)
 parser.add_argument("in_pkl", help="input CB-UMI list dict in a pickle file", type=str)
+parser.add_argument("in_mtx", help="input count matrix dir", type=str)
 parser.add_argument("out_dir", help="output count matrix dir", type=str)
 parser.add_argument("--intragenic", help="include UMIs with intragenic alignments in the count matrix", action="store_true")
 args = parser.parse_args()
-# args = parser.parse_args(["bam.bam","read_peak_distance.tsv","cb-umi_dict.pickle","ocr_count_intergenic"])
+# args = parser.parse_args(["high_quality_cells.bam","read_peak_distance.tsv","cb-umi_dict.pickle", "filtered_feature_bc_matrix", "ocr_count_intergenic"])
 
 # if the output directory exists, we delete it
 if os.path.exists(args.out_dir):
@@ -56,7 +57,8 @@ if not os.path.exists(args.in_bam+".bai"):
 in_bam = pysam.AlignmentFile(args.in_bam, "rb")
 
 peak_set = set()
-cb_umi_peak_dict = {cb: {} for cb in cb_umi_dict.keys()}
+# we read in the barcodes.tsv.gz file to get the list of barcodes
+cb_umi_peak_dict = {cb.strip(): {} for cb in gzip.open(os.path.join(args.in_mtx, "barcodes.tsv.gz"),'rt')}
 for read in in_bam:
     # the read has to have a peak assigned
     peak_distance_tuple = read_peak_distance_dict.get(read.query_name) 
@@ -65,7 +67,7 @@ for read in in_bam:
         umi = read.get_tag("UB")
             
         # we only process UMIs that are not intragenic
-        if args.intragenic or umi not in cb_umi_dict.get(cb):
+        if args.intragenic or umi not in cb_umi_peak_dict.get(cb):
             # if the CB-UMI pair is not in the dict, we add it
             # else, we update it if the distance is smaller
             if cb_umi_peak_dict[cb].get(umi) is None:
@@ -83,7 +85,7 @@ in_bam.close()
 
 # generate the count matrix
 # first, we need to create an empty pandas dataframe
-cb_list = list(cb_umi_dict.keys())
+cb_list = list(cb_umi_peak_dict.keys())
 df = pd.DataFrame(0, index=list(peak_set), columns=cb_list)
 
 # then, we traverse the dict to fill in the count matrix

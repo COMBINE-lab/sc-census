@@ -13,7 +13,7 @@ workflow ocr_count {
         .map{ row-> tuple(row.species,
                             row.peak_name,
                             row.sample_type,
-                            row.peak_file_path)
+                            "${projectDir}/${row.peak_file_path}")
         }
         
         // get sense txome UMIs
@@ -21,7 +21,7 @@ workflow ocr_count {
         // make input
         // combine by species, sample_type
         input = high_quality_cells_bam
-                    .combine(sense_txome_umis, by:[0,1,2,3])
+                    .combine(sense_txome_umis, by:[0,1,2,3,4])
                     // out: species, ref_name, sample_type, sample_name, fcb_dir, high_quality_cells_bam, sense_txome_umis
                     .combine(peaks, by:[0,2])
                     // out: species, sample_type, ref_name, sample_name, fcb_dir, high_quality_cells_bam, sense_txome_umis,peak_name, peak_file_path
@@ -44,11 +44,15 @@ workflow ocr_count {
 process ocr_count_intergenic {
     label "cmd"
     publishDir "${params.output_dir}/quantification/${sample_name}/${ref_name}", mode: 'symlink'
+    afterScript "rm -rf read_peak_distance.tsv bam.bam peaks.bed"
+
     input:
         tuple val(species),
             val(sample_type),
             val(ref_name),
             val(sample_name),
+            val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam),
             path(sense_txome_umis),
@@ -80,13 +84,14 @@ process ocr_count_intergenic {
     bedtools closest \
     -d -t first \
     -a bam.bam \
-    -b peaks.bed | awk '\$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
+    -b peaks.bed | awk '\$NF ~ /^[0-9]+\$/ && \$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
 
     cp $moduleDir/generate_count_matrix.py .
     python generate_count_matrix.py \
     bam.bam \
     read_peak_distance.tsv \
     $sense_txome_umis \
+    $filtered_mtx_dir \
     ocr_count_intergenic
 
     """
@@ -95,11 +100,15 @@ process ocr_count_intergenic {
 process ocr_count_non_coding {
     label "cmd"
     publishDir "${params.output_dir}/quantification/${sample_name}/${ref_name}", mode: 'symlink'
+    afterScript "rm -rf read_peak_distance.tsv bam.bam peaks.bed"
+
     input:
         tuple val(species),
             val(sample_type),
             val(ref_name),
             val(sample_name),
+            val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam),
             path(sense_txome_umis),
@@ -131,7 +140,7 @@ process ocr_count_non_coding {
     bedtools closest \
     -d -t first \
     -a bam.bam \
-    -b peaks.bed | awk '\$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
+    -b peaks.bed | awk '\$NF ~ /^[0-9]+\$/ && \$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
 
 
     cp $moduleDir/generate_count_matrix.py .
@@ -139,6 +148,7 @@ process ocr_count_non_coding {
     bam.bam \
     read_peak_distance.tsv \
     $sense_txome_umis \
+    $filtered_mtx_dir \
     ocr_count_non_coding
     """
 }
@@ -147,11 +157,14 @@ process ocr_count_non_coding {
 process ocr_count_not_sense_coding {
     label "cmd"
     publishDir "${params.output_dir}/quantification/${sample_name}/${ref_name}", mode: 'symlink'
+    afterScript "rm -rf read_peak_distance.tsv bam.bam"
     input:
         tuple val(species),
             val(sample_type),
             val(ref_name),
             val(sample_name),
+            val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam),
             path(sense_txome_umis),
@@ -178,13 +191,14 @@ process ocr_count_not_sense_coding {
     bedtools closest \
     -d -t first \
     -a bam.bam \
-    -b $peak_file_path | awk '\$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
+    -b $peak_file_path | awk '\$NF ~ /^[0-9]+\$/ && \$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
 
     cp $moduleDir/generate_count_matrix.py .
     python generate_count_matrix.py \
     bam.bam \
     read_peak_distance.tsv \
     $sense_txome_umis \
+    $filtered_mtx_dir \
     ocr_count_not_sense_coding
     """
 }
@@ -192,11 +206,14 @@ process ocr_count_not_sense_coding {
 process ocr_count_all {
     label "cmd"
     publishDir "${params.output_dir}/quantification/${sample_name}/${ref_name}", mode: 'symlink'
+    afterScript "rm -rf read_peak_distance.tsv"
     input:
         tuple val(species),
             val(sample_type),
             val(ref_name),
             val(sample_name),
+            val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam),
             path(sense_txome_umis),
@@ -216,13 +233,14 @@ process ocr_count_all {
     bedtools closest \
     -d -t first \
     -a $high_quality_cells_bam \
-    -b $peak_file_path | awk '\$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
+    -b $peak_file_path | awk '\$NF ~ /^[0-9]+\$/ && \$NF < ${params.read_peak_dist_threshold} && \$NF >= 0 {print \$4"\\t"\$13":"\$14"-"\$15"\\t"\$NF}' - > read_peak_distance.tsv
 
     cp $moduleDir/generate_count_matrix.py .
     python generate_count_matrix.py \
     $high_quality_cells_bam \
     read_peak_distance.tsv \
     $sense_txome_umis \
+    $filtered_mtx_dir \
     ocr_count_all \
     --intragenic
     """

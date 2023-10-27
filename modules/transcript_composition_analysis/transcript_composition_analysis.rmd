@@ -1146,6 +1146,9 @@ protein_coding_genes = sapply(protein_coding_gene_attrs, function(s) {
     strsplit(strsplit(s, "gene_id ")[[1]][2], ";")[[1]][1]
 }, USE.NAMES = FALSE)
 
+# we filter out genes that do not in the txdb (because of lacking exons)
+protein_coding_genes = protein_coding_genes[protein_coding_genes %in% names(gs)]
+
 export.bed(sort(gs[protein_coding_genes]), con=file.path(bed_dir, "protein_coding_genes.bed"))
 ```
 

@@ -1,0 +1,13 @@
+name: CMD
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - simpleaf
+  - piscem
+  - bedtools
+  - samtools
+  - 10x_bamtofastq
+  - pysam
+  - scipy
+  - pandas

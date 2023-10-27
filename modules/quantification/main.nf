@@ -36,9 +36,10 @@ workflow simpleaf {
         .fromPath(params.input_files.ref_sheet)
         .splitCsv(header:true, sep: ",", strip: true)
         .map{ row-> tuple(row.species,
-                            row.ref_name,
-                            row.genome_path,
-                            row.gtf_path)
+                          row.ref_name,
+                          "${projectDir}/${row.genome_path}",
+                          "${projectDir}/${row.gtf_path}"
+                        )
         }
         // ##############
         // simpleaf_index

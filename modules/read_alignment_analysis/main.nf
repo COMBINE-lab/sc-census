@@ -17,10 +17,12 @@ process high_quality_cells_bam {
             val(gtf),
             path(fcb_dir)
     output:
-        tuple val(species), 
+        tuple val(species),
             val(ref_name),
             val(sample_type),
             val(sample_name),
+            val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path("high_quality_cells.bam")
     script:
@@ -43,6 +45,7 @@ process txome_sense_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam)
     output:
@@ -51,6 +54,7 @@ process txome_sense_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path("txome_sense.bam")
     
@@ -77,6 +81,7 @@ process txome_antisense_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam),
             path(sense_txome_umis)
@@ -87,6 +92,7 @@ process txome_antisense_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path("txome_antisense.bam")
     
@@ -118,6 +124,7 @@ process txome_splice_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam)
     
@@ -145,6 +152,7 @@ process txome_contiguous_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(high_quality_cells_bam)
     
@@ -349,6 +357,7 @@ process spliced_txp_terminal_kilobase_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(txome_sense_bam)
     
@@ -434,6 +443,7 @@ process spliced_txp_terminal_kilobase_exonic_bam {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(txome_sense_bam)
     
@@ -613,6 +623,7 @@ process sense_txome_umis {
             val(ref_name),
             val(sample_name),
             val(cells_or_nuclei),
+            path(filtered_mtx_dir),
             path(fcb_dir),
             path(txome_sense_bam)
     output:
@@ -644,8 +655,8 @@ workflow read_alignment_analysis {
                             row.sample_type,
                             row.sample_name,
                             row.cells_or_nuclei,
-                            row.bam_file,
-                            row.filtered_mtx_dir)
+                            "${projectDir}/${row.bam_file}",
+                            "${projectDir}/${row.filtered_mtx_dir}")
             }
 
         workflow_input = samples

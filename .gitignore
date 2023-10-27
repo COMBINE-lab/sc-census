@@ -5,4 +5,4 @@ nextflow
 pipeline_trace*
 workflow_output
 work
-conda_envs
+conda_envs/cache

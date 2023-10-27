@@ -1,9 +1,9 @@
 species,sample_type,peak_name,peak_file_path,url
-human,human_pbmc,multiomics_peaks,https://cf.10xgenomics.com/samples/cell-arc/2.0.0/10k_PBMC_Multiome_nextgem_Chromium_X/10k_PBMC_Multiome_nextgem_Chromium_X_atac_peaks.bed,https://www.10xgenomics.com/resources/datasets/10-k-human-pbm-cs-multiome-v-1-0-chromium-x-1-standard-2-0-0
-human,human_pbmc,atac_peaks,https://cf.10xgenomics.com/samples/cell-atac/2.1.0/10k_pbmc_ATACv2_nextgem_Chromium_X/10k_pbmc_ATACv2_nextgem_Chromium_X_peaks.bed,https://www.10xgenomics.com/resources/datasets/10k-human-pbmcs-atac-v2-chromium-x-2-standard
-human,human_bmmc,multiomics_peaks,data/datasets/bmmc_site4_donor08_multiome/atac_peaks.bed,https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM5828492
-human,human_brain,multiomics_peaks,https://cf.10xgenomics.com/samples/cell-arc/2.0.0/human_brain_3k/human_brain_3k_atac_peaks.bed,https://www.10xgenomics.com/resources/datasets/frozen-human-healthy-brain-tissue-3-k-1-standard-2-0-0
-mouse,mouse_brain,multiomics_peaks,https://cf.10xgenomics.com/samples/cell-arc/2.0.0/e18_mouse_brain_fresh_5k/e18_mouse_brain_fresh_5k_atac_peaks.bed,https://www.10xgenomics.com/resources/datasets/fresh-embryonic-e-18-mouse-brain-5-k-1-standard-2-0-0
-mouse,mouse_brain,atac_peaks,https://cf.10xgenomics.com/samples/cell-atac/1.1.0/atac_v1_E18_brain_fresh_5k/atac_v1_E18_brain_fresh_5k_peaks.bed,https://www.10xgenomics.com/resources/datasets/fresh-cortex-hippocampus-and-ventricular-zone-from-embryonic-mouse-brain-e-18-1-standard-1-1-0
+human,human_pbmc,multiomics_peaks,data/peaks/10k_PBMC_Multiome_nextgem_Chromium_X_atac_peaks.bed,https://www.10xgenomics.com/resources/datasets/10-k-human-pbm-cs-multiome-v-1-0-chromium-x-1-standard-2-0-0
+human,human_pbmc,atac_peaks,data/peaks/10k_pbmc_ATACv2_nextgem_Chromium_X_peaks.bed,https://www.10xgenomics.com/resources/datasets/10k-human-pbmcs-atac-v2-chromium-x-2-standard
+human,human_bmmc,multiomics_peaks,data/peaks/bmmc_site4_donor08_multiome_peaks.bed,https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM5828492
+human,human_brain,multiomics_peaks,data/peaks/human_brain_3k_atac_peaks.bed,https://www.10xgenomics.com/resources/datasets/frozen-human-healthy-brain-tissue-3-k-1-standard-2-0-0
+mouse,mouse_brain,multiomics_peaks,data/peaks/e18_mouse_brain_fresh_5k_atac_peaks.bed,https://www.10xgenomics.com/resources/datasets/fresh-embryonic-e-18-mouse-brain-5-k-1-standard-2-0-0
+mouse,mouse_brain,atac_peaks,data/peaks/atac_v1_E18_brain_fresh_5k_peaks.bed,https://www.10xgenomics.com/resources/datasets/fresh-cortex-hippocampus-and-ventricular-zone-from-embryonic-mouse-brain-e-18-1-standard-1-1-0
 
 
