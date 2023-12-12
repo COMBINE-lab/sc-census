@@ -13,5 +13,6 @@
 #SBATCH --mail-user=dhe17@umd.edu
 
 PROJDIR="/fs/nexus-projects/sc_read_census/nextflow"
+cd $PROJDIR
 
 $PROJDIR/nextflow $PROJDIR/main.nf -resume

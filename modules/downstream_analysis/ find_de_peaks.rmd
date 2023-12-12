@@ -1,0 +1,231 @@
+---
+title: "Correlating ATAC-seq peak count with OCR-associated count"
+author: "Dongze He, Steve M. Mount, and Rob Patro"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        code_folding: hide
+        fig_caption: true
+        self_contained: true
+
+params:
+    utils_path : null
+    celltypist_csv : null
+    atac_count_dir : null
+    atac_frag_path : null
+    out_dir : null
+    species : null
+    num_threads : 1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_library}
+
+suppressPackageStartupMessages({
+    library(Seurat)
+    library(Signac)
+    library(Seurat)
+    library(GenomicFeatures)
+    library(doParallel)
+})
+
+quant_dir = "/fs/nexus-projects/sc_read_census/nextflow/workflow_output/quantification/10k_PBMC_Multiome_nextgem_Chromium_X/refdata-gex-GRCh38-2020-A/multiomics_peaks"
+
+params = list(
+    utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+    celltypist_csv = "/fs/nexus-projects/sc_read_census/nextflow/work/b2/ba6405bcde95f439d250145505bb1f/celltypist_predictions.csv",
+    atac_count_dir = "/fs/nexus-projects/sc_read_census/nextflow/data/datasets/10k_PBMC_Multiome_nextgem_Chromium_X/filtered_feature_bc_matrix",
+    atac_frag_path = "/fs/nexus-projects/sc_read_census/nextflow/data/datasets/10k_PBMC_Multiome_nextgem_Chromium_X/atac_fragments.tsv.gz",
+    ref_dir = "/fs/nexus-projects/sc_read_census/nextflow/data/refs/refdata-gex-GRCh38-2020-A",
+    out_dir = "atac_ocr_correlation",
+    sample_type = "nuclei",
+    num_threads = 20
+)
+
+```
+
+create output directories
+
+```{r}
+# we use fishpond to load simpleaf count matrix and Seurat Read10X to load others
+filtered_mtx = Read10X(file.path(params$atac_count_dir))
+genome <- Biostrings::readDNAStringSet(file.path(params$ref_dir, "fasta", "genome.fa"))
+# get the first word as the name
+names(genome) <- stringr::word(names(genome), 1)
+
+features = read.csv(file.path(params$atac_count_dir, "features.tsv.gz"), sep = "\t", header = FALSE)
+colnames(features) = c("gene_id", "gene_name", "type", "chr", "start", "end")
+features = features[features$type == "Gene Expression",]
+features = features[,c("gene_id", "gene_name", "chr", "start", "end")]
+features = features[features$chr %in% names(genome),]
+
+gtf_df = read.table(file.path(params$ref_dir, "genes", "genes.gtf"), header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+gene_attrs = gtf_df[gtf_df$V3 == "gene","V9"]
+
+protein_coding_gene_attrs = gene_attrs[sapply(gene_attrs, function(s) grepl("protein_coding", s, fixed = TRUE), USE.NAMES = FALSE)]
+
+protein_coding_genes = sapply(protein_coding_gene_attrs, function(s) {
+    strsplit(strsplit(s, "gene_id ")[[1]][2], ";")[[1]][1]
+}, USE.NAMES = FALSE)
+
+features$gene_biotype = "non_coding"
+features$gene_biotype[features$gene_id %in% protein_coding_genes] = "protein_coding"
+# rownames(features) = features$gene_name
+
+celltypist_df <- read.csv(params$celltypist_csv, stringsAsFactors = FALSE)
+celltypist_df$barcodes = paste0(celltypist_df$barcodes, "-1")
+rownames(celltypist_df) = celltypist_df$barcodes
+```
+
+```{r}
+# get gene annotations for hg38
+annotations <- GenomicRanges::makeGRangesFromDataFrame(features, seqinfo = seqinfo(genome), keep.extra.columns = TRUE)
+
+# create a Seurat object containing the RNA adata
+seurat_obj <- CreateSeuratObject(
+  counts = filtered_mtx$`Gene Expression`[,celltypist_df$barcodes],
+  assay = "RNA"
+)
+
+# create ATAC assay and add it to the object
+seurat_obj[["ATAC"]] <- CreateChromatinAssay(
+  counts = filtered_mtx$Peaks[,celltypist_df$barcodes],
+  sep = c(":", "-"),
+  fragments = params$atac_frag_path,
+  annotation = annotations
+)
+
+DefaultAssay(seurat_obj) <- "RNA"
+seurat_obj <- SCTransform(seurat_obj)
+seurat_obj <- RunPCA(seurat_obj)
+
+DefaultAssay(seurat_obj) <- "ATAC"
+seurat_obj <- FindTopFeatures(seurat_obj, min.cutoff = 5)
+seurat_obj <- RunTFIDF(seurat_obj)
+seurat_obj <- RunSVD(seurat_obj)
+
+seurat_obj <- AddMetaData(
+        object = seurat_obj,
+        metadata = celltypist_df[colnames(seurat_obj),"majority_voting"],
+        col.name = "cell_types"
+    )
+
+Idents(seurat_obj) <- "cell_types" 
+
+options(future.globals.maxSize= 1000*1024^2)
+
+if (params$num_threads < 2) {
+    registerDoSEQ()
+} else {
+    registerDoParallel(cores = params$num_threads)
+}
+
+# pair_df = expand.grid(unique((celltypist_df$majority_voting)),unique((celltypist_df$majority_voting)), stringsAsFactors = FALSE )
+# pair_df = pair_df[pair_df$Var1 != pair_df$Var2,]
+marker_df = foreach(ident=unique((celltypist_df$majority_voting)), .combine=rbind) %dopar% {
+    print(paste0("processing cluster ", ident))
+    df = FindMarkers(
+        object = seurat_obj,
+        ident.1 = pair[1],
+        # ident.2 = pair[2],
+        test.use = 'LR',
+        only.pos = TRUE,
+        min.pct = 0.05,
+        latent.vars = 'nCount_ATAC',
+        verbose = TRUE
+    )
+    df$cluster = ident
+}
+
+de_peaks = sapply(rownames(marker_df), function(x) {
+    spl = strsplit(x, "-")
+    paste0(spl[[1]][1], ":", spl[[1]][2], "-", spl[[1]][3])
+})
+
+```
+
+```{r}
+de_peaks = intersect(de_peaks, rownames(ocr_count_intergenic))
+de_peaks = intersect(de_peaks, rownames(atac_count))
+
+ocr_count_intergenic = ocr_count_intergenic[de_peaks,]
+ocr_count_intergenic = ocr_count_intergenic[,colSums(ocr_count_intergenic) != 0]
+atac_count = atac_count[rownames(ocr_count_intergenic),colnames(ocr_count_intergenic)]
+
+
+set.seed(123)
+cos.sim=function(ma, mb){
+  mat=crossprod(ma, mb)
+  t1=sqrt(apply(ma, 2, crossprod))
+  t2=sqrt(apply(mb, 2, crossprod))
+  mat / outer(t1,t2)
+}
+cs = abs(cos.sim(as.matrix(atac_count[de_peaks,]),(as.matrix(ocr_count_intergenic[de_peaks,]))))
+
+sig = sapply(1:ncol(cs), function(i) {
+    sum(cs[i,i] < cs[i,])
+})
+
+null_rand_cell = sapply(1:ncol(cs), function(i) {
+    k = sample(ncol(cs),1)
+    sum(cs[i,k] < cs[i,])
+})
+
+null_rand_cs = sapply(1:ncol(cs), function(i) {
+    k = sample(cs,ncol(cs))
+    sum(k < sample(cs,1))
+})
+
+null_permut = sample(ncol(cs),ncol(cs), replace = TRUE)
+
+shuf_cs = abs(cos.sim(
+    as.matrix(atac_count[rownames(ocr_count_intergenic),][
+        sample(nrow(ocr_count_intergenic)), 
+        sample(ncol(ocr_count_intergenic))
+    ]),
+    (as.matrix(ocr_count_intergenic)[
+        sample(nrow(ocr_count_intergenic)), 
+        sample(ncol(ocr_count_intergenic))
+    ]
+)))
+
+null_shuf_count = sapply(1:ncol(shuf_cs), function(i) {
+    sum(shuf_cs[i,i] < shuf_cs[i,])
+})
+
+df = reshape2::melt(data.frame(
+    "sig" = sig,
+    "null_rand_cell" = null_rand_cell,
+    "null_rand_cs" = null_rand_cs,
+    "null_permut" = null_permut,
+    "null_shuf_count" = null_shuf_count
+))
+
+colnames(df) = c("type", "ranking")
+
+
+pdf(file.path(hist_dir, "de_peak_rank_ocr_intergenic.pdf"), width = 10, height = 10)
+par(mfrow = c(3,2))
+
+plot(density(sig), main = "ranking", xlab = "rank")
+# abline(v = 0.05)
+plot(density(null_rand_cell), main = "null: ranking of a random cell", xlab = "rank")
+plot(density(null_rand_cs), main = "null: ranking of a random cell in a random distribution", xlab = "rank")
+plot(density(null_permut), main = "null: random ranking (permutation)", xlab = "rank")
+plot(density(null_shuf_count), main = "null: shuffled count matrix", xlab = "rank")
+par(mfrow = c(1,1))
+
+# ggplot(df, aes(x=ranking, fill=type)) +
+#   geom_density(alpha=0.4) 
+#   + geom_vline(xintercept=0.05 * ncol(cs), linetype="dashed")
+
+dev.off()
+```
+
+

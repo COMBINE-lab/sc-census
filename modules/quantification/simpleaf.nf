@@ -31,8 +31,8 @@ process simpleaf_index() {
 
 process simpleaf_quant() {
     label "cmd"
-    publishDir "${params.output_dir}/quantification/${sample_name}/${ref_name}/simpleaf_quant/${orientation}", mode: 'symlink'
-    afterScript "rm -rf simpleaf_quant/af_map/map.rad simpleaf_quant/af_quant/map.collated.rad"
+    publishDir "${params.output_dir}/quantification/${sample_name}/${ref_name}/simpleaf_quant", mode: 'symlink'
+    afterScript "rm -rf simpleaf_quant/af_map/map.rad ${orientation}_af_quant/map.collated.rad"
 
     input:
         tuple val(species),
@@ -51,9 +51,7 @@ process simpleaf_quant() {
             val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
-            val(orientation),
-            path(filtered_mtx_dir),
-            path("simpleaf_quant/af_quant/*")
+            path("${orientation}_af_quant")
     
     """
     export ALEVIN_FRY_HOME="af_home"
@@ -84,6 +82,7 @@ process simpleaf_quant() {
         --resolution cr-like
 
     cp ${index_dir}/gene_id_to_name.tsv simpleaf_quant/af_quant
+    mv simpleaf_quant/af_quant ${orientation}_af_quant
     """
 }
 

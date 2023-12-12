@@ -1,0 +1,15 @@
+name: ATAC
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+  - anaconda
+dependencies:
+  - r-signac
+  - r-seurat
+  - r-matrix=1.6.1
+  - macs2
+  - bioconductor-BSgenome
+  - bioconductor-Biostrings
+  - bioconductor-GenomicFeatures
+  - bioconductor-GenomicRanges

@@ -14,16 +14,12 @@ workflow quantification {
     main:
     ocr_count(txome_sense_bam, high_quality_cells_bam, sense_txome_umis)
     simpleaf(txome_sense_bam, txome_antisense_bam)    
+
     
     emit:
-        ocr_count_intergenic = ocr_count.out.intergenic
-        ocr_count_non_coding = ocr_count.out.non_coding
-        ocr_count_not_sense_coding = ocr_count.out.not_sense_coding
-        ocr_count_all = ocr_count.out.all
-        simpleaf_quant = simpleaf.out.fw
-        simpleaf_quant = simpleaf.out.rc
+        ocr = ocr_count.out
+        simpleaf = simpleaf.out
 }
-
 
 workflow simpleaf {
     take:
@@ -58,8 +54,9 @@ workflow simpleaf {
         rc_input = txome_antisense_bam.combine(simpleaf_index.out, by:[0,1])
         simpleaf_quant_rc(rc_input, "rc")
 
+        out = simpleaf_quant_fw.out.combine(simpleaf_quant_rc.out, by:[0,1,2,3,4])
+
         emit:
-            fw = simpleaf_quant_fw.out
-            rc = simpleaf_quant_rc.out
+            out
         
 }

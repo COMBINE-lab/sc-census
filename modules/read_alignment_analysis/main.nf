@@ -73,7 +73,7 @@ process txome_sense_bam {
 
 process txome_antisense_bam {
     label "cmd"
-    afterScript "rm txome_antisense_all.bam"
+    afterScript "rm -rf txome_antisense_all.bam"
 
     input:
         tuple val(species), 
@@ -174,7 +174,7 @@ process txome_contiguous_bam {
 process exon_exon_junction_bam {
     label "cmd"
     publishDir "${params.output_dir}/read_alignment_analysis/${sample_name}/${ref_name}", mode: 'symlink'
-    afterScript 'rm -rf spliced_alignments_not_in_exons.bam spliced_alignments_not_in_exons_span_start_site.bam  spliced_alignments_span_exons.bam '
+    afterScript 'rm -rf spliced_alignments_not_in_exons.bam spliced_alignments_not_in_exons_span_start_site.bam  spliced_alignments_span_exons.bam spliced_alignments_span_exons.bed spliced_alignments_span_exons_first_base.bed spliced_alignments_span_exons_last_base.bed spliced_alignments_span_exons_first_base_in_exons_row_id.txt spliced_alignments_span_exons_last_base_in_exons_row_id.txt spliced_alignments_span_exons_row_id.txt spliced_alignments_span_exons_row_id_with_header_row_id.txt header_row_id.txt'
 
 
     input:
@@ -349,7 +349,7 @@ process txp_terminal_exon_bam {
 process spliced_txp_terminal_kilobase_bam {
     label "cmd"
     publishDir "${params.output_dir}/read_alignment_analysis/${sample_name}/${ref_name}", mode: 'symlink'
-    afterScript 'rm -rf spliced_transcripts_terminal_kilobase_range.bam '
+    afterScript 'rm -rf spliced_transcripts_terminal_kilobase_range.bam spliced_transcripts_terminal_kilobase_range.bed spliced_transcripts_terminal_kilobase_range_first_base.bed spliced_transcripts_terminal_kilobase_range_first_base_in_exons_row_id.txt spliced_transcripts_terminal_kilobase_alignments_row_id.txt spliced_transcripts_terminal_kilobase_alignments_row_id_with_header_row_id.txt'
 
     input:
         tuple val(species), 
@@ -417,16 +417,16 @@ process spliced_txp_terminal_kilobase_bam {
     | awk '{print \$4}' | uniq  > spliced_transcripts_terminal_kilobase_range_last_base_in_exons_row_id.txt
 
     ### find the common row ids
-    comm -12 --nocheck-order spliced_transcripts_terminal_kilobase_range_first_base_in_exons_row_id.txt spliced_transcripts_terminal_kilobase_range_last_base_in_exons_row_id.txt > 500_PBMC_3p_LT_Chromium_X_possorted_genome_spliced_transcripts_terminal_kilobase_alignments_row_id.txt
+    comm -12 --nocheck-order spliced_transcripts_terminal_kilobase_range_first_base_in_exons_row_id.txt spliced_transcripts_terminal_kilobase_range_last_base_in_exons_row_id.txt > spliced_transcripts_terminal_kilobase_alignments_row_id.txt
 
     ### add header rowids to the file
     seq 1 \$n_header > header_row_id.txt
 
-    cat header_row_id.txt 500_PBMC_3p_LT_Chromium_X_possorted_genome_spliced_transcripts_terminal_kilobase_alignments_row_id.txt > 500_PBMC_3p_LT_Chromium_X_possorted_genome_spliced_transcripts_terminal_kilobase_alignments_row_id_with_header_row_id.txt
+    cat header_row_id.txt spliced_transcripts_terminal_kilobase_alignments_row_id.txt > spliced_transcripts_terminal_kilobase_alignments_row_id_with_header_row_id.txt
 
     ### we filter the BAM file
     awk 'NR==FNR{a[\$1]; next} FNR in a' \
-    500_PBMC_3p_LT_Chromium_X_possorted_genome_spliced_transcripts_terminal_kilobase_alignments_row_id_with_header_row_id.txt \
+    spliced_transcripts_terminal_kilobase_alignments_row_id_with_header_row_id.txt \
     <(samtools view -h spliced_transcripts_terminal_kilobase_range.bam) \
     | samtools view -@ ${params.num_threads} -b > spliced_txp_three_prime_terminal_kilobase.bam
     """
@@ -571,7 +571,7 @@ process introns_bam {
 // This process take the feature_category_bams as input
 process umi_category_analysis {
     label "py"
-    publishDir "${params.output_dir}/downstream_analysis/${sample_name}/${ref_name}", mode: 'symlink'
+    publishDir "${params.output_dir}/downstream_analysis/feature_category_analysis/${sample_name}/${ref_name}", mode: 'symlink'
     input:
         tuple val(species), 
             val(ref_name),
@@ -588,12 +588,6 @@ process umi_category_analysis {
             path(exon_bam),
             path(introns_bam)
     output:
-        tuple val(species), 
-            val(ref_name),
-            val(sample_type),
-            val(sample_name),
-            val(cells_or_nuclei),
-            path("read_alignment_analysis/cb-umi_dict.pickle"), emit: sense_txome_umis
         path("read_alignment_analysis")
     """
     cp $moduleDir/umi_category_analysis.py .
@@ -614,20 +608,19 @@ process umi_category_analysis {
     """
 }
 
-
 process sense_txome_umis {
     label "cmd"
     input:
         tuple val(species), 
-            val(sample_type),
             val(ref_name),
+            val(sample_type),
             val(sample_name),
             val(cells_or_nuclei),
             path(filtered_mtx_dir),
             path(fcb_dir),
             path(txome_sense_bam)
     output:
-        tuple val(species),
+        tuple val(species), 
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -672,6 +665,7 @@ workflow read_alignment_analysis {
         // 2. split txome sense and antisense alignments
         // ##############################################
         txome_sense_bam(high_quality_cells_bam.out)
+        sense_txome_umis(txome_sense_bam.out)
         // out: species, ref_name, sample_type, sample_name, fcb_dir, txome_sense_bam
 
         // ################################################
@@ -736,7 +730,7 @@ workflow read_alignment_analysis {
         // ##########################################
         // 9. txome antisense alignments
         // ##########################################
-        txome_antisense_bam_input = high_quality_cells_bam.out.combine(umi_category_analysis.out.sense_txome_umis, by: [0,1,2,3,4])
+        txome_antisense_bam_input = high_quality_cells_bam.out.combine(sense_txome_umis.out, by: [0,1,2,3,4])
 
         txome_antisense_bam(txome_antisense_bam_input)
 
@@ -744,7 +738,7 @@ workflow read_alignment_analysis {
             txome_sense_bam = txome_sense_bam.out
             txome_antisense_bam = txome_antisense_bam.out
             high_quality_cells_bam = high_quality_cells_bam.out
-            sense_txome_umis = umi_category_analysis.out.sense_txome_umis
+            sense_txome_umis = sense_txome_umis.out
 }   
 
 

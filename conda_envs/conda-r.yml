@@ -2,25 +2,32 @@ name: R
 channels:
   - conda-forge
   - bioconda
+  - defaults
+  - anaconda
 dependencies:
-  - r-base=4.3.1
+  - r-base=4.3.2
   - r-rmarkdown
   - r-doParallel
   - r-seurat
-  - r-signac
+  # - r-signac
   - r-pheatmap
   - r-mclust
   - r-openxlsx
   - r-HGNChelper
   - r-dplyr
   - r-igraph
-  - r-openxlsx
   - r-ggplot2
   - r-ggpubr
   - r-ggVennDiagram
   - r-pheatmap
   - r-devtools
   - r-UpSetR
+  - r-aricode
+  - r-dendextend
+  - r-Matrix=1.6_1.1
+  # - macs2
+  - bioconductor-bsgenome.hsapiens.ucsc.hg38
+  - bioconductor-bsgenome.mmusculus.ucsc.mm10
   - bioconductor-limma
   - bioconductor-glmGamPoi
   - bioconductor-fishpond
@@ -29,3 +36,4 @@ dependencies:
   - bioconductor-GenomicFeatures
   - bioconductor-GenomicRanges
   - bioconductor-SingleCellExperiment
+  - bioconductor-Herper

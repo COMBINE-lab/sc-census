@@ -1,5 +1,5 @@
 ---
-title: "Antisense Gene Expression Count Matrices Analysis"
+title: "Transcriptomic Gene Expression Count Matrices Analysis"
 author: "Dongze He, Steve M. Mount, and Rob Patro"
 date: "`r Sys.Date()`"
 output: 
@@ -12,8 +12,10 @@ output:
         self_contained: true
 
 params:
+    utils_path: null
     celltypist_csv: null
-    quant_dir: null
+    fw_quant_dir: null
+    rc_quant_dir: null
     out_dir: null
     sample_type: null
     num_threads: 1
@@ -31,15 +33,6 @@ if (!require("findPC")) {
     devtools::install_github("haotian-zhuang/findPC")
 }
 
-if (!require("clevr")) {
-    install.packages("clevr", verbose = FALSE, quiet = TRUE)
-}
-
-# if (!require("ggVennDiagram")) {
-#     install.packages("ggVennDiagram", verbose = FALSE, quiet = TRUE)
-# }
-
-
 suppressPackageStartupMessages({
     library(fishpond)
     library(Seurat)
@@ -56,135 +49,85 @@ suppressPackageStartupMessages({
     library(UpSetR)
 })
 
-params = list(
-    celltypist_csv = "celltypist_predictions.csv",
-    sense_quant_dir = "/fs/nexus-projects/sc_read_census/nextflow/workflow_output/quantification/bmmc_site4_donor08_multiome/refdata-gex-GRCh38-2020-A/simpleaf_quant/fw/simpleaf_quant/af_quant",
-    antisense_quant_dir = "/fs/nexus-projects/sc_read_census/nextflow/workflow_output/quantification/bmmc_site4_donor08_multiome/refdata-gex-GRCh38-2020-A/simpleaf_quant/rc/simpleaf_quant/af_quant",
-    out_dir = ".",
-    sample_type = "cell",
-    num_threads = 10,
-    num_pcs = 50,
-    logfc.threshold = 0.25
+
+sample_type_to_tissue_dict <- list(
+    human_pbmc = "Immune system",
+    huamn_bmmc = "Immune system",
+    human_brain = "Brain",
 )
 
+# params = list(
+#     celltypist_csv = "celltypist_predictions.csv",
+#     utils_path = "/nfshomes/zaza/cbcb-scratch/Projects/sc_read_concensus/nextflow/modules/downstream_analysis/r_utils.R",
+#     quant_dir = ".",
+#     out_dir = ".",
+#     sample_type = "cell",
+#     num_threads = 10,
+#     num_pcs = 50,
+#     logfc.threshold = 0.25
+# )
+
+source(params$utils_path)
 ```
 ## Introduction
 
-In scRNA-seq, antisense reads are an non-trivial read group but have been ignored all the time. In this analysis, we will explore the count matrix generated using only antisense reads in the scRNA-seq data and see if they can be used to assist downstream analyses. Notice that when building the antisense count matrix, we only count the UMIs that do not have any sense reads. This is because we want to separate the signals in sense and antisense reads.
+Clustering analysis is an important data analysis type in scRNA-seq analysis. Conventionally, this analysis utlizes the ``conventional" gene expression count matrix -- the spliced+ambiguous (SA) UMI count matrix for single-cell samples, and spliced+unspliced+ambiguous (USA) UMI count matrix for single-nucleus samples. Recently, Cell Ranger started to use the spliced+unspliced+ambiguous UMI count matrix as the default setting for both single-cell and single-nucleus samples. They also posted a technical note showing that this changes can improve the gene discovery rate, and at the same time does not affect the clustering results.
+
+In this analysis, we want to show that 
+1. this change, from SA to USA, does affect the clustering results in single-cell samples, and it will affect the differentially expressed genes discovered in each cluster/cell type.
+2. extending from the first point, we want to show that, when fixing the number of clusters, the clustering results using different count matrices, including open chromatin region-assotiated count matrices, are similar but not identical, and the differentially expressed genes discovered in each cluster/cell type are different. Here we tested three set of cluster sizes: a low number of clusters, a medium number of clusters, and a high number of clusters. 
+    - low number of clusters: the number of clsuters taht can be easily identified by eye-balling the tSNE/UMAP plot
+    - medium number of clusters: the number of cell types identified by celltypist or sctype using the conventional count matrix: SA for single-cell samples, and USA for single-nucleus samples.
+    - high number of clusters: $1.5$ times the medium number of clusters.
+3. we want to comment on a recent paper about concatenating SA and U as the input for clustering analysis (https://www.biorxiv.org/content/10.1101/2023.09.17.558131v2.full.pdf). We want to show that when fixing the number of clusters, all count matrices will give similar clustering results, and the differentially expressed genes discovered in each cluster/cell type are different. For the USA matrix, we want to show its DEGs almost forms a superset of the DEGs in the SA matrix and U matrix, and their methods just generated another very similar results.
+
+From this analysis, we want to draw the following conclusions:
+1. All UMI count matrices we analyzed contain biological information.
+2. The DEGs discovered in each cluster/cell type are different, and the DEGs discovered in the USA matrix almost forms a superset of the DEGs discovered in the SA matrix and U matrix. We want to call the arm to either generate a concensus DEG list using all count matrices, or to redefine the "DE" analysis in single-cell analysis representing the modalities. 
 
 ## Preprocessing
-we first create the output directories 
+
 ```{r define_out_dirs}
-fig_dir <- file.path(params$out_dir, "antisense_figures")
-dir.create(fig_dir,  recursive = TRUE, showWarnings = FALSE)
+heatmap_dir <- file.path(params$out_dir, "similarity_score_heatmaps")
+deg_dir <- file.path(params$out_dir,"DEG_results")
+dim_reduc_dir <- file.path(params$out_dir, "dim_reduction_plots")
+umap_dir <- file.path(dim_reduc_dir, "umap_plots")
+tsne_dir <- file.path(dim_reduc_dir, "tsne_plots")
+dir.create(heatmap_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(dim_reduc_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(umap_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tsne_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(deg_dir,  recursive = TRUE, showWarnings = FALSE)
 ```
 
-## Load data
-We then read the celltypist cell type assignment result and sense and antisense count matrices. This analysis is mainly about comparing the undetected genes (zeros in the matrices) in sense and antisense count matrices. We will also 
+```{r set_env}
+# parallel
+n_threads <- params$num_threads
+
+# pipeline
+verbose <- FALSE
+logfc.threshold = params$logfc.threshold
+
+metrics = c("ari", "fmi", "nmi")
+# metrics = c("ari", "knn_spearman")
+```
+
+```{r load_data}
+sense_quant_dir <- file.path(params$fw_quant_dir)
+antisense_quant_dir <- file.path(params$rc_quant_dir)
+sce = loadFry(sense_quant_dir, outputFormat = "raw")
+antisense_sce = loadFry(antisense_quant_dir, outputFormat = "raw")[rownames(sce),colnames(sce)]
+gid2name_df <- read.csv(file.path(params$quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
+
+# we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
+rownames(sce) <- make.unique(gid2name_df[match(rownames(sce), gid2name_df[,1]),2])
+```
 
 ```{r load_celltypist}
 celltypist_df <- read.csv(params$celltypist_csv, stringsAsFactors = FALSE)
 sce = sce[,colnames(sce) %in% celltypist_df$barcode]
+antisense_sce = antisense_sce[,colnames(sce)]
 ```
-
-we first load sense and antisense quant results
-```{r load_data}
-sense_sce = loadFry(params$sense_quant_dir, outputFormat = "raw")
-gid2name_df <- read.csv(file.path(params$antisense_quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
-# we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
-rownames(sense_sce) <- make.unique(gid2name_df[match(rownames(sense_sce), gid2name_df[,1]),2])
-```
-
-```{r load_data}
-antisense_sce = loadFry(params$antisense_quant_dir, outputFormat = "raw")
-gid2name_df <- read.csv(file.path(params$antisense_quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
-# we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
-rownames(antisense_sce) <- make.unique(gid2name_df[match(rownames(antisense_sce), gid2name_df[,1]),2])
-
-sense_sce = sense_sce[rownames(antisense_sce), colnames(antisense_sce)]
-```
-
-
-Then, we get the count matrices for each of the three count types
-
-```{r get_matrices}
-sense_s = assay(sense_sce, "spliced", withDimnames=TRUE) 
-sense_u = assay(sense_sce, "unspliced", withDimnames=TRUE) 
-sense_a = assay(sense_sce, "ambiguous", withDimnames=TRUE) 
-
-antisense_s = assay(antisense_sce, "spliced", withDimnames=TRUE)
-antisense_u = assay(antisense_sce, "unspliced", withDimnames=TRUE)
-antisense_a = assay(antisense_sce, "ambiguous", withDimnames=TRUE)
-
-sense_s = as.matrix(sense_s[rowSums(sense_s) > 0 & rowSums(antisense_s) > 0,])
-sense_u = as.matrix(sense_u[rowSums(sense_u) > 0 & rowSums(antisense_u) > 0,])
-sense_a = as.matrix(sense_a[rowSums(sense_a) > 0 & rowSums(antisense_a) > 0,])
-
-antisense_s = as.matrix(antisense_s[rownames(sense_s),])
-antisense_u = as.matrix(antisense_u[rownames(sense_u),])
-antisense_a = as.matrix(antisense_a[rownames(sense_a),])
-```
-
-
-# pearson correlation between sense and antisense counts
-
-If the antisense reads are technical noise like cDNA priming, we will see a high correlation between sense and antisense counts. The reason is that technicial noise will have no preference for genes. Therefore, highly expressed genes will have more antisense reads than lowly expressed genes because they have more transcripts to generate noise.
-
-If we do not see this correlation, then the antisense reads are not only technical noise. They can contain signals from antisense transcripts and other regulatory elements.
-
-we compute the correlation between the sense and antisense count of each cell
-```{r sense_antisense_sim}
-n_samples = min(20, ncol(sense_s))
-sumbsample_cells = sample(1:ncol(sense_s), n_samples)
-
-pearson_s = rep(0, n_samples)
-spearman_s = rep(0, n_samples)
-
-pearson_u = rep(0, n_samples)
-spearman_u = rep(0, n_samples)
-
-pearson_a = rep(0, n_samples)
-spearman_a = rep(0, n_samples)
-
-for (id in 1:n_samples) {
-    cid = sumbsample_cells[id]
-
-    s_nonzero = (sense_s[,cid] > 0) | (antisense_s[,cid] > 0)
-    u_nonzero = (sense_u[,cid] > 0) | (antisense_u[,cid] > 0)
-    a_nonzero = (sense_a[,cid] > 0) | (antisense_a[,cid] > 0)
-
-
-    pearson_s[id] = cor(sense_s[s_nonzero,cid], antisense_s[s_nonzero,cid], method = "pearson")
-    spearman_s[id] = cor(sense_s[s_nonzero,cid], antisense_s[s_nonzero,cid], method = "spearman")
-
-    pearson_u[id] = cor(sense_u[u_nonzero,cid], antisense_u[u_nonzero,cid], method = "pearson")
-    spearman_u[id] = cor(sense_u[u_nonzero,cid], antisense_u[u_nonzero,cid], method = "spearman")
-
-    pearson_a[id] = cor(sense_a[sense_a,cid], antisense_a[sense_a,cid], method = "pearson")
-    spearman_a[id] = cor(sense_a[sense_a,cid], antisense_a[sense_a,cid], method = "spearman")
-}
-
-pearson_s[is.na(pearson_s)] = 0
-spearman_s[is.na(spearman_s)] = 0
-
-pearson_u[is.na(pearson_u)] = 0
-spearman_u[is.na(spearman_u)] = 0
-
-pearson_a[is.na(pearson_a)] = 0
-spearman_a[is.na(spearman_a)] = 0
-
-pdf(file.path(fig_dir, "sense_antisense_correlation.pdf"))
-hist(pearson_s, xlab = "pearson similarity score", main = paste0("Pearson correlation between sense and antisense spliced counts of ", n_samples, " cells"))
-
-# write to file
-ggarrange(plotlist = list(
-
-))
-
-```
-
-
-
 
 ## create Seurat objects
 
@@ -209,11 +152,20 @@ if (n_threads < 2) {
     registerDoParallel(cores = n_threads)
 }
 
+
+total_sense = sce@assays@data$spliced + sce@assays@data$unspliced + sce@assays@data$ambiguous
+
+total_antisense = antisense_sce@assays@data$spliced + antisense_sce@assays@data$unspliced + antisense_sce@assays@data$ambiguous
+
+total_sense_imputed = total_sense
+total_sense_imputed[total_sense == 0 & total_sense != 0] = 1
+
+
 seurat_obj_list <- list(
     USA = list(
         count_type = "USA",
         seurat_obj = create_seurat_obj(
-            m = sce@assays@data$spliced + sce@assays@data$unspliced + sce@assays@data$ambiguous,
+            m = total_sense,
             sce = sce,
             project = "USA"
         )
@@ -249,12 +201,34 @@ seurat_obj_list <- list(
             sce = sce,
             project = "A"
         )
+    ),
+    both_USA = list(
+        count_type = "both_USA",
+        seurat_obj = create_seurat_obj(
+            m = total_sense + total_antisense,
+            sce = sce,
+            project = "both_USA"
+        )
+    ),
+    imputed_USA = list(
+        count_type = "imputed_USA",
+        seurat_obj = create_seurat_obj(
+            m = total_sense_imputed,
+            sce = sce,
+            project = "imputed_USA"
+        )
     )
 )
 
+common_cells = Reduce(intersect, lapply(seurat_obj_list, function(x) colnames(x$seurat_obj)))
+
+seurat_obj_list = lapply(seurat_obj_list, function(x) {
+    x$seurat_obj = x$seurat_obj[,common_cells]
+    x
+})
 n_celltypist_clusters = length(unique(celltypist_df$majority_voting))
 
-all_clusters_result_list <- foreach(n_clusters = c(floor(n_celltypist_clusters/2),n_celltypist_clusters, ceiling(n_celltypist_clusters * 1.5)), .combine = "c") %dopar% {
+all_clusters_result_list <- foreach(n_clusters = c(max(floor(n_celltypist_clusters/5),3), max(floor(n_celltypist_clusters/3),6),n_celltypist_clusters, ceiling(n_celltypist_clusters * 1.5)), .combine = "c") %dopar% {
     # create clusters result list
     clusters_result_list <-
         foreach(seurat_obj_set = seurat_obj_list, .combine = "c") %dopar% {
@@ -275,7 +249,7 @@ all_clusters_result_list <- foreach(n_clusters = c(floor(n_celltypist_clusters/2
         main = paste0("(", n_clusters, " clusters)"),
         dataset_id = "my_data",
         metrics = metrics,
-        fontsize = 10
+        fontsize = 15
     )
 
     dir.create(file.path(heatmap_dir, paste0(n_clusters,"_clusters")), recursive = TRUE, showWarnings = FALSE)
@@ -341,20 +315,15 @@ clusters_result_list = foreach (clusters_result_set=all_clusters_result_list[[as
     ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0(count_type, " counts tSNE plot colored by celltypist clusters"))
 
     # plot tSNE
-    pdf(file.path(tsne_dir,paste0(count_type,"_tSNE.pdf")),width = 20,height = 10)
+    pdf(file.path(tsne_dir,paste0(count_type,"_tSNE.pdf")),width = 12,height = 6)
     print(ggarrange(plotlist = list(st,ct)))
     dev.off()
-    tsne_plot_list = c(tsne_plot_list, st)
-    tsne_plot_list = c(tsne_plot_list, ct)
 
     # plot UMAP
-    pdf(file.path(umap_dir,paste0(count_type,"_UMAP.pdf")),width = 20,height = 10)
+    pdf(file.path(umap_dir,paste0(count_type,"_UMAP.pdf")),width = 12,height = 6)
     print(ggarrange(plotlist = list(su,cu)))
     dev.off()
     
-    umap_plot_list = c(umap_plot_list, su)
-    umap_plot_list = c(umap_plot_list, cu)
-
     clusters_result_set$clusters_result$seurat_obj <- seurat_obj
 
     clusters_result_set$heatmap_list = list(
@@ -417,8 +386,7 @@ for (marker_df_set in marker_df_list) {
             assay_name = marker_df_set$name,
             only_positive = FALSE,
             report_size = 100,
-            report_size_factor = 2,
-            assays.use.report_size_factor = c("USA")
+            report_size_factor = 2
         )
         
         if (nrow(deg_df) > 0) {
@@ -476,7 +444,7 @@ for (cell_type in names(cell_type_count_type_marker_list)) {
         #         labs(title = cell_type) +
         #         theme(legend.position = "none")
             
-        #     pdf(file.path(dataset_vd_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")),width = 20,height = 10)
+        #     pdf(file.path(dataset_vd_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")),width = 12,height = 6)
         #     print(plotlist[[cell_type]])
         #     dev.off()
         # }

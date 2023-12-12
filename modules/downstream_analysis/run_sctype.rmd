@@ -1,0 +1,93 @@
+---
+title: "Run scType"
+author: "Dongze He, Steve M. Mount, and Rob Patro"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        code_folding: hide
+        fig_caption: true
+        self_contained: true
+
+params:
+    utils_path: null
+    fw_quant_dir: null
+    out_dir: null
+    cells_or_nuclei: null
+    sample_type: null
+    num_threads: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load_library}
+
+if (!require("findPC")) {
+    devtools::install_github("haotian-zhuang/findPC")
+}
+
+suppressPackageStartupMessages({
+    library(fishpond)
+    library(Seurat)
+    library(SingleCellExperiment)
+    library(openxlsx)
+})
+
+# params = list(
+#     utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+#     fw_quant_dir = "fw_af_quant",
+#     out_dir = "sctype_out",
+#     cells_or_nuclei = "nuclei",
+#     sample_type= "human_pbmc",
+#     num_threads= 32
+# )
+
+source(params$utils_path)
+dir.create(params$out_dir,  recursive = TRUE, showWarnings = FALSE)
+
+```
+
+```{r load_data}
+sce = loadFry(file.path(params$fw_quant_dir), outputFormat = "raw")
+
+sce = sce[,(colSums(sce@assays@data$spliced) > 3 & colSums(sce@assays@data$unspliced) > 3 & colSums(sce@assays@data$ambiguous) > 3)]
+
+gid2name_df <- read.csv(file.path(params$fw_quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
+
+# we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
+rownames(sce) <- make.unique(gid2name_df[match(rownames(sce), gid2name_df[,1]),2])
+```
+
+```{r run_sctype}
+
+if (params$cells_or_nuclei == "cells") {
+    seurat_obj = create_seurat_obj(
+        m = sce@assays@data$spliced + sce@assays@data$ambiguous,
+        sce = sce,
+        project = "SA"
+    )
+
+} else {
+    seurat_obj = create_seurat_obj(
+        m = sce@assays@data$spliced + sce@assays@data$unspliced + sce@assays@data$ambiguous,
+        sce = sce,
+        project = "USA"
+    )
+}
+
+tissue = if(params$sample_type == "human_pbmc" | params$sample_type == "human_bmmc"){"Immune system"}else{"Brain"}
+
+clusters_results = find_seurat_clusters(seurat_obj)
+clusters_results = sctype(clusters_results, tissue = tissue)
+
+ct_df = data.frame(barcode = names(clusters_results$sctype_clusters), cell_type = clusters_results$sctype_clusters)
+ct_df = ct_df[ct_df$cell_type != "Unknown",]
+
+write.csv(ct_df, file.path(params$out_dir, "sctype_predictions.csv"), row.names = FALSE)
+
+```

@@ -1,0 +1,709 @@
+---
+title: "Open Chromatin Region Count Matrices Analysis"
+author: "Dongze He, Steve M. Mount, and Rob Patro"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        code_folding: hide
+        fig_caption: true
+        self_contained: true
+
+params:
+    utils_path : null
+    sctype_csv : null
+    simpleaf_count_dir : null
+    intergenic_count_dir : null
+    ocr_count_intergenic_dir : null
+    ocr_count_non_coding_dir : null
+    ocr_count_not_sense_coding_dir : null
+    ocr_count_all_dir : null
+    ccres_count_intergenic_dir : null
+    ccres_count_non_coding_dir : null
+    ccres_count_not_sense_coding_dir : null
+    ccres_count_all_dir : null
+    out_dir : null
+    sample_type : null
+    num_threads : 1
+    num_pcs : 50
+    logfc.threshold : 0.25
+    read_peak_dist_threshold : 4000
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this analysis, we want to talk about the following points:
+1. Intergenic reads can take up to 10% of the total reads. They are usually ignored in the quantification, therefore, in the downstream analyses.
+2. We saw that if we take each intergenic region as a feature and count the reads that map to it, and use resulting count matrix can be used for clustering analysis, the clustering result is very similar to the clustering result using the gene count matrix when the number of clusters is low. When the number of clusters is high, the clustering result goes down but still not very bad. This means that reads that map to intergenic regions should not be simply regarded as noise. They contain biological signals that are specific to cell clusters. 
+3. We also saw that if we count the UMIs close to each ATAC-seq peak from a same/similar sample type, and use the resulting count matrix for clustering analysis, we can still get a decent clustering result when the number of clusters was set as a low number. This further proved the conclusiont in 2, which was that those intergenic reads are not simply noise.
+4. Then, we want to decide if those signals come from regulatory elements, like enhancer RNAs, or unannotated transcripts. The assumption is that if these signals are from regulatory elements on the genome, they will be correlated with ATAC-seq peak counts. On the contrary, if they are from unannotated transcripts, most of them will be close to the end of annotated genes.   
+    - If those reads are from regulatory elements: When we select only differential peaks of cell types, ATAC-seq counts should be highly correlated with the counts from those reads.
+    - If those reads are from unannotated transcripts: We should see those reads not only coming from some very specific regions (possible priming sites), but also close to the current end of genes.
+
+```{r load_library}
+
+if (!require("findPC")) {
+    devtools::install_github("haotian-zhuang/findPC")
+}
+
+suppressPackageStartupMessages({
+    library(fishpond)
+    library(Seurat)
+    library(doParallel)
+    library(SingleCellExperiment)
+    library(pheatmap)
+    library(RColorBrewer)
+    library(ggpubr)
+    library(ggplot2)
+    library(igraph)
+    library(openxlsx)
+    library(HGNChelper)
+    library(ggVennDiagram)
+    library(UpSetR)
+    library(grid)
+})
+
+# params = list(
+#     utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+#     sctype_csv = "sctype_predictions.csv",
+#     intergenic_count_dir = "intergenic_count",
+#     ocr_count_intergenic_dir = "ocr_count_intergenic",
+#     ocr_count_non_coding_dir = "ocr_count_non_coding",
+#     ocr_count_not_sense_coding_dir = "ocr_count_not_sense_coding",
+#     ocr_count_all_dir = "ocr_count_all",
+#     ccres_count_intergenic_dir = "cCREs_count_intergenic",
+#     ccres_count_non_coding_dir = "cCREs_count_non_coding",
+#     ccres_count_not_sense_coding_dir = "cCREs_count_not_sense_coding",
+#     ccres_count_all_dir = "cCREs_count_all",
+#     out_dir = "ocr_count_analysis",
+#     simpleaf_count_dir = "fw_af_quant",
+#     sample_type = "nuclei",
+#     num_threads = 32,
+#     num_pcs = 50,
+#     logfc.threshold = 0.25,
+#     read_peak_dist_threshold = 4000
+# )
+
+source(params$utils_path)
+
+```
+
+## Load data
+
+```{r load_data}
+
+# we use fishpond to load simpleaf count matrix and Seurat Read10X to load others
+output_format = if (params$sample_type == "cells") "scrna" else "snrna"
+sce = loadFry(file.path(params$simpleaf_count_dir), outputFormat = output_format)
+gid2name_df <- read.csv(file.path(params$simpleaf_count_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
+
+sctype_df <- read.csv(params$sctype_csv, stringsAsFactors = FALSE)
+sce = sce[,colnames(sce) %in% sctype_df$barcode]
+colnames(sce) = paste0(colnames(sce), "-1")
+sctype_df$barcode = paste0(sctype_df$barcode, "-1")
+
+common_cells = colnames(sce)
+# load ocr count matrices
+intergenic_count = Read10X(params$intergenic_count_dir)
+common_cells = intersect(common_cells, colnames(intergenic_count))
+ocr_count_intergenic = Read10X(params$ocr_count_intergenic_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_intergenic))
+ocr_count_non_coding = Read10X(params$ocr_count_non_coding_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_non_coding))
+ocr_count_not_sense_coding = Read10X(params$ocr_count_not_sense_coding_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_not_sense_coding))
+ocr_count_all = Read10X(params$ocr_count_all_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_all))
+ccres_count_intergenic = Read10X(params$ccres_count_intergenic_dir)
+common_cells = intersect(common_cells, colnames(ccres_count_intergenic))
+ccres_count_non_coding = Read10X(params$ccres_count_non_coding_dir)
+common_cells = intersect(common_cells, colnames(ccres_count_non_coding))
+ccres_count_not_sense_coding = Read10X(params$ccres_count_not_sense_coding_dir)
+common_cells = intersect(common_cells, colnames(ccres_count_not_sense_coding))
+ccres_count_all = Read10X(params$ccres_count_all_dir)
+common_cells = intersect(common_cells, colnames(ccres_count_all))
+
+cat(paste0("The number of UMIs in the standard count matrix is ", sum(counts(sce)), "\n"))
+cat(paste0("The number of UMIs in the intergenic count matrix is ", sum(intergenic_count), "\n"))
+cat(paste0("The number of UMIs in the ocr intergenic count matrix is ", sum(ocr_count_intergenic), "\n"))
+cat(paste0("The number of UMIs in the ocr non-coding count matrix is ", sum(ocr_count_non_coding), "\n"))
+cat(paste0("The number of UMIs in the ocr not sense coding count matrix is ", sum(ocr_count_not_sense_coding), "\n"))
+cat(paste0("The number of UMIs in the ocr all count matrix is ", sum(ocr_count_all), "\n"))
+cat(paste0("The number of UMIs in the cCREs intergenic count matrix is ", sum(ccres_count_intergenic), "\n"))
+cat(paste0("The number of UMIs in the cCREs non-coding count matrix is ", sum(ccres_count_non_coding), "\n"))
+cat(paste0("The number of UMIs in the cCREs not sense coding count matrix is ", sum(ccres_count_not_sense_coding), "\n"))
+cat(paste0("The number of UMIs in the cCREs all count matrix is ", sum(ccres_count_all), "\n"))
+
+```
+
+## Preprocessing
+
+```{r define_out_dirs}
+
+hist_dir <- file.path(params$out_dir, "histograms")
+dir.create(hist_dir,  recursive = TRUE, showWarnings = FALSE)
+
+heatmap_dir <- file.path(params$out_dir, "similarity_score_heatmaps")
+deg_dir <- file.path(params$out_dir,"DEG_results")
+dim_reduc_dir <- file.path(params$out_dir, "dim_reduction_plots")
+umap_dir <- file.path(dim_reduc_dir, "umap_plots")
+tsne_dir <- file.path(dim_reduc_dir, "tsne_plots")
+rds_dir <- file.path(params$out_dir, "rds")
+dir.create(heatmap_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(dim_reduc_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(umap_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tsne_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(deg_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(rds_dir,  recursive = TRUE, showWarnings = FALSE)
+
+```
+
+```{r set_env}
+# parallel
+n_threads <- params$num_threads
+
+# pipeline
+verbose <- FALSE
+logfc.threshold = params$logfc.threshold
+
+metrics = c("ari", "fmi", "nmi")
+# metrics = c("ari", "knn_spearman")
+```
+
+## create Seurat objects
+
+We will have three versions of the counts
+- SA: The sum of spliced and ambiguous count
+- USA: The sum of spliced, unspliced and ambiguous count
+- S: Spliced count
+- U: Unspliced count
+- A: Ambiguous count
+
+Then, we will use these count matrices to find cell clusters. We will find three sets of clusters, each set with a different number of clusters. The three sets of clusters are:
+- low number of clusters: 1/3 of the number of cell types discovered by sctype
+- medium number of clusters: the number of cell types discovered by sctype1
+- high number of clusters: 1.5 times the number of cell types discovered by sctype
+
+We wish to show that when the resolution is low, the clustering result of all count matrices agree with each other. However, when increase the resolution, the clustering results of different count matrices will be different.
+
+```{r create_seurat_objects}
+
+seurat_obj_list <- list(
+    standard = list(
+        count_type = "standard",
+        seurat_obj = create_seurat_obj(
+            m = counts(sce)[,common_cells],
+            sce = sce,
+            min.cells = 3,
+            min.features = 3,
+            project = "standard"
+        )
+    ),
+    intergenic = list(
+        count_type = "intergenic",
+        seurat_obj = CreateSeuratObject(
+                counts = intergenic_count[,common_cells],
+                min.cells = 0,
+                min.features = 0,
+                project = "intergenic"
+            )
+    ),
+    ocr_intergenic = list(
+        count_type = "ocr_intergenic",
+        seurat_obj = CreateSeuratObject(
+                counts = ocr_count_intergenic[,common_cells],
+                min.cells = 0,
+                min.features = 0,
+                project = "ocr_intergenic"
+            )
+    ),
+    ocr_non_coding = list(
+        count_type = "ocr_non_coding",
+        seurat_obj = CreateSeuratObject(
+                counts = ocr_count_non_coding[,common_cells],
+                min.cells = 0,
+                min.features = 0,
+                project = "ocr_non_coding"
+            )
+    ),
+    ocr_not_sense_coding = list(
+        count_type = "ocr_not_sense_coding",
+        seurat_obj = CreateSeuratObject(
+                counts = ocr_count_not_sense_coding[,common_cells],
+                min.cells = 0,
+                min.features = 0,
+                project = "ocr_not_sense_coding"
+            )
+    ),
+    ocr_all = list(
+        count_type = "ocr_all",
+        seurat_obj = CreateSeuratObject(
+                counts = ocr_count_all[,common_cells],
+                min.cells = 0,
+                min.features = 0,
+                project = "ocr_all"
+            )
+    )
+    # ,
+    # ccres_intergenic = list(
+    #     count_type = "cCREs_intergenic",
+    #     seurat_obj = CreateSeuratObject(
+    #             counts = ccres_count_intergenic[,common_cells],
+    #             min.cells = 0,
+    #             min.features = 0,
+    #             project = "cCREs_intergenic"
+    #         )
+    # ),
+    # ccres_non_coding = list(
+    #     count_type = "cCREs_non_coding",
+    #     seurat_obj = CreateSeuratObject(
+    #             counts = ccres_count_non_coding[,common_cells],
+    #             min.cells = 0,
+    #             min.features = 0,
+    #             project = "cCREs_non_coding"
+    #         )
+    # ),
+    # ccres_not_sense_coding = list(
+    #     count_type = "cCREs_not_sense_coding",
+    #     seurat_obj = CreateSeuratObject(
+    #             counts = ccres_count_not_sense_coding[,common_cells],
+    #             min.cells = 0,
+    #             min.features = 0,
+    #             project = "cCREs_not_sense_coding"
+    #         )
+    # ),
+    # ccres_all = list(
+    #     count_type = "cCREs_all",
+    #     seurat_obj = CreateSeuratObject(
+    #             counts = ccres_count_all[,common_cells],
+    #             min.cells = 0,
+    #             min.features = 0,
+    #             project = "cCREs_all"
+    #         )
+    # )
+)
+
+```
+
+## Find cell clusters
+
+```{r find_cell_clusters}
+
+if (n_threads < 2) {
+    registerDoSEQ()
+} else {
+    registerDoParallel(cores = n_threads)
+}
+
+n_sctype_clusters = length(unique(sctype_df$cell_type))
+
+n_clusters_vec = rep(
+    c(
+        min(max(floor(n_sctype_clusters* 0.2),3), 5), 
+        min(max(floor(n_sctype_clusters*0.6),7), 10),
+        n_sctype_clusters
+    ),
+    length(seurat_obj_list)
+)
+
+name_list = rep(names(seurat_obj_list), each = 3)
+
+interm_clusters_result_list = foreach (it_id = seq(1, length(name_list)) , .combine = "c") %dopar% {
+    n_clusters = n_clusters_vec[it_id]
+    count_type = name_list[it_id]
+    seurat_obj = seurat_obj_list[[count_type]]$seurat_obj
+    print(paste0("Finding clusters for ", count_type, " count matrix with ", n_clusters, " clusters"))        
+    
+    # Because each peak is relateively short comparing with genes, we use 90% of the peaks as variable features to capture the most of the variance
+    # As for the intergenic count matrix, it only has ~2000 features, so we also use 90% of them as the variable features
+    # variable.features.n = if (count_type == "standard") 3000 else min(50000, floor(nrow(seurat_obj) * 0.7))
+
+    variable.features.n = if (count_type == "standard") 3000 else floor(nrow(seurat_obj) * 0.7)
+
+    result_list = list()
+    result_list[[count_type]]$name <- count_type
+    result_list[[count_type]]$clusters_result <- seurat_clusters(
+        seurat_obj = seurat_obj,
+        n_clusters = n_clusters,
+        step_size = 0.4,
+        variable.features.n = variable.features.n,
+        verbose = FALSE,
+        # mt = FALSE,
+        # sct = FALSE
+        mt = count_type == "standard",
+        sct = count_type == "standard"
+    )
+    gc()
+
+    out_list = list()
+    out_list[[as.character(n_clusters)]] = result_list
+    out_list
+}
+
+all_clusters_result_list = list()
+
+for (n_clusters in unique(names(interm_clusters_result_list))) {
+    clusters_result_list = lapply(interm_clusters_result_list[which(names(interm_clusters_result_list) == n_clusters)], function(x) x[[1]])
+    names(clusters_result_list) = sapply(clusters_result_list, function(x) x$name)
+
+    heatmap_list <- make_heatmaps(
+        clusters_result_list = clusters_result_list,
+        main = paste0("(", n_clusters, " clusters)"),
+        dataset_id = "my_data",
+        metrics = metrics,
+        fontsize = 15,
+        angle_col = 90
+    )
+
+    dir.create(file.path(heatmap_dir, paste0(n_clusters,"_clusters")), recursive = TRUE, showWarnings = FALSE)
+    for (metric in paste0(metrics, "_heatmap")) {
+        pdf(file.path(heatmap_dir, 
+                        paste0(n_clusters,"_clusters"), 
+                        paste0(metric,".pdf")
+                    )
+            #         ,
+            # width = 10,
+            # height = 10
+        )
+        # Draw the heatmap
+        grid::grid.draw(rectGrob(gp=gpar(fill="white", lwd=0)))
+        grid::grid.draw(heatmap_list[[metric]])
+        dev.off()
+    }
+
+    all_clusters_result_list[[as.character(n_clusters)]] = list(
+        n_clusters = n_clusters,
+        clusters_result_list = clusters_result_list,
+        heatmap_list = heatmap_list
+    )
+    gc()
+
+}
+
+
+gc()
+```
+
+From the heatmaps we can see that, when the number of clusters is low, the clustering results of all count matrices agree with each other, though all matrices, except the standard count matrix, containing "unexpected" signals. However, when the number of clusters is high, the clustering results of different count matrices will be different. This indicates that the open chromatin region-associated count matrix contains cell type specific signals: On the one hand, they follow the same highly level-clustering pattern as the standard count matrix in a low resolution; On the other hand, they express distinct fine-resolution clustering patterns when the number of clusters is high, which indicates that they contain cell type specific signals that are not captured by the standard count matrix. 
+
+## Visualize the clusters
+
+Next, just for visualization purpose, we plot the tSNE/UMAP plot for each count matrix using sctype clusters
+
+```{r plot_dim_reduction}
+
+if (n_threads < 2) {
+    registerDoSEQ()
+} else {
+    registerDoParallel(cores = round(n_threads/2))
+}
+
+for (cid in names(all_clusters_result_list)) {
+    dir.create(file.path(umap_dir, cid), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(tsne_dir, cid), recursive = TRUE, showWarnings = FALSE)
+    
+    # cell_to_cluster_map = all_clusters_result_list[[as.character(n_sctype_clusters)]]$clusters_result_list[["standard"]]$clusters_result$seurat_clusters
+    # names(cell_to_cluster_map) <- colnames(all_clusters_result_list[[as.character(n_sctype_clusters)]]$clusters_result_list[["standard"]]$clusters_result$seurat_obj)
+    so = all_clusters_result_list[[cid]]$clusters_result_list[["standard"]]$clusters_result$seurat_obj
+    cell_to_cluster_map = Idents(so)
+
+    foreach (clusters_result_set=all_clusters_result_list[[cid]]$clusters_result_list, .combine = "c") %dopar% {
+
+        gc()
+        seurat_obj <- clusters_result_set$clusters_result$seurat_obj
+        count_type <- clusters_result_set$name
+        seurat_obj <- AddMetaData(
+            object = seurat_obj,
+            metadata = cell_to_cluster_map[colnames(seurat_obj)],
+            col.name = "standard_clusters"
+        )
+        seurat_obj <- RunUMAP(
+            object = seurat_obj,
+            dims = 1:clusters_result_set$clusters_result$npcs,
+            verbose = FALSE
+        )
+        seurat_obj <- RunTSNE(
+            object = seurat_obj,
+            dims = 1:clusters_result_set$clusters_result$npcs,
+            verbose = FALSE,
+            check_duplicates = FALSE
+        )
+        
+        gc()
+        
+        Idents(seurat_obj) <- "seurat_clusters"
+        su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by seurat clusters found using ", count_type, " counts"))
+        st = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by seurat clusters found using ", count_type, " counts"))
+
+        Idents(seurat_obj) <- "standard_clusters"
+        cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by standard counts"))
+        ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by standard counts"))
+
+        # plot tSNE
+        pdf(file.path(tsne_dir,cid,paste0(count_type,"_tSNE.pdf")),width = 12,height = 6)
+        print(ggarrange(plotlist = list(st,ct)))
+        dev.off()
+
+        # plot UMAP
+        pdf(file.path(umap_dir,cid,paste0(count_type,"_UMAP.pdf")),width = 12,height = 6)
+        print(ggarrange(plotlist = list(su,cu)))
+        dev.off()
+        # clusters_result_set$clusters_result$seurat_obj <- seurat_obj
+
+        # clusters_result_set$heatmap_list = list(
+        #     tsne_seurat_clusters = st, 
+        #     tsne_sctype_clusters = ct, 
+        #     umap_seurat_clusters = su, 
+        #     umap_sctype_clusters = cu
+        # )
+        # out_list = list()
+        # out_list[[count_type]] = clusters_result_set
+
+        gc()
+
+        # out_list
+    }
+}
+
+```
+
+```{r plot_dim_reduction_heatmap_celltypes}
+
+# Then we do the same thing for the cell types
+
+dir.create(file.path(umap_dir, "sctype"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(tsne_dir, "sctype"), recursive = TRUE, showWarnings = FALSE)
+
+foreach (clusters_result_set=all_clusters_result_list[[cid]]$clusters_result_list, .combine = "c") %dopar% {
+    seurat_obj <- clusters_result_set$clusters_result$seurat_obj
+    seurat_obj <- seurat_obj[,sctype_df$barcode]
+    count_type <- clusters_result_set$name
+    seurat_obj <- AddMetaData(
+        object = seurat_obj,
+        metadata = sctype_df$cell_type,
+        col.name = "standard_clusters"
+    )
+    seurat_obj <- RunUMAP(
+        object = seurat_obj,
+        dims = 1:clusters_result_set$clusters_result$npcs,
+        verbose = FALSE
+    )
+    seurat_obj <- RunTSNE(
+        object = seurat_obj,
+        dims = 1:clusters_result_set$clusters_result$npcs,
+        verbose = FALSE,
+        check_duplicates = FALSE
+    )
+    
+    Idents(seurat_obj) <- "seurat_clusters"
+    su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by seurat clusters found using ", count_type, " counts"))
+    st = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by seurat clusters found using ", count_type, " counts"))
+
+    Idents(seurat_obj) <- "standard_clusters"
+    cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by cell types"))
+    ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by cell types"))
+
+    # plot tSNE
+    pdf(file.path(tsne_dir,"sctype",paste0(count_type,"_tSNE.pdf")),width = 12,height = 6)
+    print(ggarrange(plotlist = list(st,ct)))
+    dev.off()
+
+    # plot UMAP
+    pdf(file.path(umap_dir,"sctype",paste0(count_type,"_UMAP.pdf")),width = 12,height = 6)
+    print(ggarrange(plotlist = list(su,cu)))
+    dev.off()
+    # clusters_result_set$clusters_result$seurat_obj <- seurat_obj
+
+    # clusters_result_set$heatmap_list = list(
+    #     tsne_seurat_clusters = st, 
+    #     tsne_sctype_clusters = ct, 
+    #     umap_seurat_clusters = su, 
+    #     umap_sctype_clusters = cu
+    # )
+    # out_list = list()
+    # out_list[[count_type]] = clusters_result_set
+    # out_list
+}
+
+```
+
+
+
+
+From the above plots, it is clear that all count matrices led to a similar blobs of cells in the tSNE/UMAP plots, which further proved the conclusion we drew from the heatmap plots above. However, because of the fine resolution clustering assignments are so different with the standard count matrix, we need to figure out if they are simply lacking ability to do fine resolution clustering, or they are actually capturing some cell type specific signals that are totally different with those in the standard count matrix.
+
+### Distribution of intergenic counts
+
+Given the assumption that if the intergenic UMIs are all technical noise, they should be randomly distributed on the genome, and therefore, having a uniform intergenic count distribution. On the contrary, if they represent biological signals, they should come from some specific regions on the genome. 
+
+Firstly, we will see if the ratio of the length of intergnic regions to intergenic OCR regions is similar to the intergenic counts to integenic OCR counts. We will do the same thing for cCRE regions and their counts.
+
+The basic idea here is that, if intergenic reads are random noises, they should randomly spread all over the intergenic regions. Then, for each cell, the UMIs captured by open chromatin regions should be proportional to their size. That is, the ratio of the length of intergenic regions to intergenic OCR regions should be similar to the intergenic counts to intergenic OCR counts. If we calculate the ratio of these two ratios, we should get a normal distribution with mean 1. If the ratio is much larger than 1, it means that the intergenic counts are not randomly distributed on the genome. Instead, they are concentrated on some specific regions on the genome. therefore, we can use a t-test to test the significance
+```{r plot_intergenic_ratio}
+
+chr_feature_width = function(m, read_peak_dist_threshold) {
+    # get all features
+    rn = rownames(m)
+    ss = strsplit(rn, ":")
+    chrs = unique(sapply(ss, function(x) x[1]))
+    l = strsplit(sapply(ss, function(x) x[2]), "-")
+    df = data.frame(chr = sapply(ss, function(x) x[1]), start = as.integer(sapply(l, function(x) x[1]))+1, end = as.integer(sapply(l, function(x) x[2])))
+    out_df_width = data.frame(matrix(0, nrow = length(chrs), ncol = ncol(m)))
+    out_df_count = data.frame(matrix(0, nrow = length(chrs), ncol = ncol(m)))
+    rownames(out_df_width) = chrs
+    rownames(out_df_count) = chrs
+    colnames(out_df_width) = colnames(m)
+    colnames(out_df_count) = colnames(m)
+
+    for (i in 1:ncol(m)) {
+        sub_df = df[m[,i] > 0,]
+        if(nrow(sub_df) == 0) {
+            next
+        }
+        cdf = chr_feature_count(sub_df$chr, m[m[,i] > 0,i])
+        out_df_count[match(names(cdf),rownames(out_df_count)),i] = cdf
+
+        gr = reduce(makeGRangesFromDataFrame(sub_df) + read_peak_dist_threshold)
+        sub_df = data.frame(chr = seqnames(gr), width = width(gr))
+     
+        agg = aggregate(width ~ chr, data = sub_df, FUN = sum)
+
+        out_df_width[match(agg$chr,rownames(out_df_width)),i] = agg$width
+
+    }
+    list(width = out_df_width, count = out_df_count)
+}
+
+
+chr_feature_count = function(chr,fc) {
+    df = as.data.frame(cbind(chr, fc))
+    colnames(df) = c("chr", "count")
+    df$count = as.numeric(df$count)
+    agg = aggregate(count ~ chr, data = df, FUN = sum)
+    out = agg$count
+    names(out) = agg$chr
+
+    out
+}
+
+batch_size = ceiling(ncol(intergenic_count)/n_threads)
+
+width_count_ratio_batch = foreach (batch_id = seq(1, ncol(intergenic_count), by=batch_size), .combine = "cbind") %dopar% {
+    batch = batch_id:min(batch_id+batch_size-1, ncol(intergenic_count))
+    chr_intergenic = chr_feature_width(intergenic_count[,batch], 0)
+    chr_ocr_intergenic = chr_feature_width(ocr_count_intergenic[,batch], params$read_peak_dist_threshold)
+    # chr_ccres_intergenic = chr_feature_width(ccres_count_intergenic[,batch], params$read_peak_dist_threshold)
+
+    width_ratio = chr_intergenic$width/chr_ocr_intergenic$width[rownames(chr_intergenic$width),]
+    width_ratio = width_ratio[grepl("^chr",rownames(width_ratio)) & grepl("[0-9]$",rownames(width_ratio)),] + 0.01
+    width_ratio[is.na(width_ratio) | is.null(width_ratio) | width_ratio == Inf] = 0
+    count_ratio = chr_intergenic$count/chr_ocr_intergenic$count[rownames(chr_intergenic$count),] + 0.01
+    count_ratio[is.na(count_ratio) | is.null(count_ratio) | count_ratio == Inf] = 0
+    count_ratio = count_ratio[grepl("^chr",rownames(count_ratio)) & grepl("[0-9]$",rownames(count_ratio)),]
+
+    rowMeans(width_ratio)/rowMeans(count_ratio)
+}
+
+width_count_ratio_df = data.frame(chr = rownames(width_count_ratio_batch), ratio = rowMeans(width_count_ratio_batch))
+
+pdf(file.path(hist_dir, "intergenic_width_count_ratio_hist_ocr.pdf"), width = 10, height = 10)
+
+
+ggplot(width_count_ratio_df, aes(x=ratio)) +
+  geom_density(alpha=0.4) #+ 
+#   ggtitle(title"")
+
+# hist(intergenic_ocr_width_count_ratio_df$width, main = "intergenic width ratio", xlab = "intergenic width ratio", col = "red", border = "black", breaks = 10)
+
+dev.off()
+
+t.test(width_count_ratio_df$ratio, mu = 1)
+
+```
+
+
+Intergenic cCREs size ratio
+
+```{r plot_intergenic_ccres_ratio}
+
+batch_size = ceiling(ncol(intergenic_count)/n_threads)
+
+width_count_ratio_batch = foreach (batch_id = seq(1, ncol(intergenic_count), by=batch_size), .combine = "cbind") %dopar% {
+    batch = batch_id:min(batch_id+batch_size-1, ncol(intergenic_count))
+    chr_intergenic = chr_feature_width(intergenic_count[,batch], 0)
+    chr_ccres_intergenic = chr_feature_width(ccres_count_intergenic[,batch], params$read_peak_dist_threshold)
+    # chr_ccres_intergenic = chr_feature_width(ccres_count_intergenic[,batch], params$read_peak_dist_threshold)
+
+    width_ratio = chr_intergenic$width/chr_ccres_intergenic$width[rownames(chr_intergenic$width),]
+    width_ratio = width_ratio[grepl("^chr",rownames(width_ratio)) & grepl("[0-9]$",rownames(width_ratio)),] + 0.01
+    width_ratio[is.na(width_ratio) | is.null(width_ratio) | width_ratio == Inf] = 0
+    count_ratio = chr_intergenic$count/chr_ccres_intergenic$count[rownames(chr_intergenic$count),] + 0.01
+    count_ratio[is.na(count_ratio) | is.null(count_ratio) | count_ratio == Inf] = 0
+    count_ratio = count_ratio[grepl("^chr",rownames(count_ratio)) & grepl("[0-9]$",rownames(count_ratio)),]
+
+    rowMeans(width_ratio)/rowMeans(count_ratio)
+}
+
+width_count_ratio_df = data.frame(chr = rownames(width_count_ratio_batch), ratio = rowMeans(width_count_ratio_batch))
+
+pdf(file.path(hist_dir, "intergenic_width_count_ratio_hist_ccres.pdf"), width = 10, height = 10)
+
+
+ggplot(width_count_ratio_df, aes(x=ratio)) +
+  geom_density(alpha=0.4) #+ 
+#   ggtitle(title"")
+
+# hist(intergenic_ocr_width_count_ratio_df$width, main = "intergenic width ratio", xlab = "intergenic width ratio", col = "red", border = "black", breaks = 10)
+
+dev.off()
+
+t.test(width_count_ratio_df$ratio, mu = 1)
+
+```
+
+From the above result, we can see that OCR regions and cCRE regions are only about 1% of intergenic regions, but they contain most of the intergenic counts. This means that the intergenic counts are not uniformly distributed on the genome. Instead, they are highly skewed.
+
+Secondly, if intergenic counts are from biological signals, they should follow a similar count distribution as the standard count matrix. We will plot the histogram of the intergenic counts and the standard counts.
+
+```{r plot_intergenic_standard_counts}
+
+standard_feature_count = rowSums(counts(sce))
+
+standard_df = as.data.frame(standard_feature_count[standard_feature_count != 0 & standard_feature_count < quantile(standard_feature_count, 0.95)])
+
+colnames(standard_df) = c("gene_count")
+
+
+ocr_count_intergenic_feature_count = rowSums(ocr_count_intergenic)
+
+intergenic_df = as.data.frame(ocr_count_intergenic_feature_count[ocr_count_intergenic_feature_count != 0 & ocr_count_intergenic_feature_count < quantile(ocr_count_intergenic_feature_count, 0.95)])
+
+colnames(intergenic_df) = c("ocr_count")
+
+pdf(file.path(hist_dir, "ocr_intergenic_count_hist.pdf"), width = 10, height = 10)
+ggarrange(plotlist = list(
+    ggplot(standard_df, aes(x=gene_count)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white", bins = 100)+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(intergenic_df, aes(x=ocr_count)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white", bins = 100)+
+        geom_density(alpha=.2, fill="#FF6666")
+))
+
+dev.off()
+```
+
+From these two analyses, we know that the intergenic UMIs are not simply noise and they concentrate on some specific regions on the genome.
+
+## Potential sources of intergenic counts
+We came up two potential resources for those intergenic counts:
+1. They are from regulatory elements, like enhancer RNAs, promoter RNAs, or other un-annotated regulatory RNAs. We have proved the possibility by showing that the intergenic UMIs are concentrated on the identified regulatory element regions.
+2. They are from un-annotated mRNAs or alternative polyadenylation sites of annotated transcripts. This has been shown in many pubished papers. 
+
+```{r}
+knitr::knit_exit()
+```

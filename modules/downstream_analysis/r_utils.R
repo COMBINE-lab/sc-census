@@ -21,11 +21,34 @@ filter_empty <- function(af_raw_sce) {
     is.cell
 }
 
+cos.sim <- function(A,B) 
+{
+    return( sum(A*B)/sqrt(sum(A^2)*sum(B^2)) )
+}  
+
+# from ARICODE package
+adjustedRandIndex <- function(x,y){
+    x <- as.vector(x)
+    y <- as.vector(y)
+    if (length(x) != length(y))
+        stop("arguments must be vectors of the same length")
+    tab <- table(x, y)
+    if (all(dim(tab) == c(1, 1)))
+        return(1)
+    a <- sum(choose(tab, 2))
+    b <- sum(choose(rowSums(tab), 2)) - a
+    c <- sum(choose(colSums(tab), 2)) - a
+    d <- choose(sum(tab), 2) - a - b - c
+    ARI <- (a - (a + b) * (a + c)/(a + b + c + d))/((a + b +
+        a + c)/2 - (a + b) * (a + c)/(a + b + c + d))
+    return(ARI)
+}
+
 create_seurat_obj <-
     function(m,
              sce,
-             min.cells = 0,
-             min.features = 0,
+             min.cells = 3,
+             min.features = 3,
              gid2name_df = NULL,
              ...) {
         colnames(m) <- colnames(sce)
@@ -49,53 +72,66 @@ create_seurat_obj <-
 find_seurat_clusters <-
     function(seurat_obj,
              findPC_npcs = 100,
-             pcs = NULL,
-             clustering_resolution = 0.5,
+             npcs = NULL,
+             clustering_resolution = 0.7,
              redo_knn = FALSE,
-             verbose = FALSE) {
+             verbose = FALSE,
+             variable.features.n = 3000,
+             mt = TRUE,
+             sct = TRUE) {
         # if scale.data is not there, find variable features
-        if (IsMatrixEmpty(GetAssayData(seurat_obj, slot = "scale.data"))) {
-            seurat_obj <-
-                PercentageFeatureSet(seurat_obj, pattern = "^MT-", col.name = "percent.mt")
+        if (IsMatrixEmpty(GetAssayData(seurat_obj, layer = "scale.data"))) {
+            if (mt) {
+                seurat_obj <- PercentageFeatureSet(seurat_obj, pattern = "^MT-", col.name = "percent.mt")
+                seurat_obj$percent.mt[is.na(seurat_obj$percent.mt)] = 0
+            } 
             
             # From here https://satijalab.org/seurat/articles/sctransform_vignette.html
-            seurat_obj <-
-                SCTransform(
+
+            if (sct) {
+                seurat_obj <-SCTransform(
                     seurat_obj,
-                    method = "glmGamPoi",
+                    # method = "glmGamPoi",
                     vars.to.regress = "percent.mt",
                     assay = seurat_obj@active.assay,
+                    variable.features.n = variable.features.n,
+                    # variable.features.n = min(variable.features.n, nrows(seurat_obj)),
                     verbose = verbose
                 )
+            } else {
+                seurat_obj <- NormalizeData(seurat_obj,verbose = verbose)
+                seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures = variable.features.n, verbose = verbose)
+                seurat_obj <- ScaleData(seurat_obj, verbose = verbose)
+            }
         }
         # if pca hasn't been computed, do it
         if (!"pca" %in% names(seurat_obj@reductions)) {
-            if (is.null(pcs)) {
-                pcs <- max(findPC(
+            if (is.null(npcs)) {
+                npcs <- max(c(findPC::findPC(
                     sdev =  RunPCA(seurat_obj,
                                    npcs = findPC_npcs,
                                    verbose = verbose)[["pca"]]@stdev,
                     number = findPC_npcs,
                     method = "all"
+                )
+                # ,30
                 ))
             }
             seurat_obj <- RunPCA(seurat_obj,
-                                 npcs = max(pcs),
+                                 npcs = npcs,
                                  verbose = verbose)
         } else {
-            if (is.null(pcs)) {
-                pcs <- length(seurat_obj[["pca"]])
+            if (is.null(npcs)) {
+                npcs <- length(seurat_obj[["pca"]])
             }
         }
-        
-        if (!"RNA_nn" %in% names(seurat_obj@graphs) || redo_knn) {
-            if (length(pcs) == 1)
-                pcs <- 1:pcs
+        if (!any(c("RNA_nn","SCT_nn") %in% names(seurat_obj@graphs)) || redo_knn) {
             seurat_obj <-
-                FindNeighbors(seurat_obj, dims = pcs, verbose = verbose)
+                FindNeighbors(seurat_obj, dims = 1:npcs, verbose = verbose)
         }
         seurat_obj <- FindClusters(seurat_obj,
                                    resolution = clustering_resolution,
+                                   random.seed = 14,
                                    verbose = verbose)
         
         seurat_clusters = as.numeric(as.character(seurat_obj$seurat_clusters)) + 1
@@ -105,7 +141,7 @@ find_seurat_clusters <-
             seurat_clusters = seurat_clusters,
             n_clusters = max(seurat_clusters),
             clustering_resolution = clustering_resolution,
-            pcs = pcs,
+            npcs = npcs,
             seurat_obj = seurat_obj,
             knn_graph = seurat_obj@graphs$SCT_snn
         )
@@ -114,17 +150,24 @@ find_seurat_clusters <-
 seurat_clusters <-
     function(seurat_obj,
              n_clusters = NULL,
-             pcs = NULL,
+             npcs = NULL,
              start_resolution = 0.5,
              step_size = 0.1,
              redo_knn = FALSE,
-             verbose = FALSE) {
+             variable.features.n = 3000,
+             verbose = FALSE,
+             mt = TRUE,
+             sct = TRUE,
+             max_n_rounds = 20) {
         clusters_result <- find_seurat_clusters(
             seurat_obj,
-            pcs = pcs,
+            npcs = npcs,
             clustering_resolution = start_resolution,
+            variable.features.n = variable.features.n,
             redo_knn = redo_knn,
-            verbose = verbose
+            verbose = verbose,
+            mt = mt,
+            sct = sct
         )
         
         # if we don't need to tune clustering_resolution, just return
@@ -136,41 +179,52 @@ seurat_clusters <-
         tuned_resolution <- start_resolution
         last_nclusters <- clusters_result$n_clusters
         
-        
-        while (last_nclusters != n_clusters) {
-            
+        n_rounds = 0
+        ress = c()
+        while (last_nclusters != n_clusters || n_rounds < max_n_rounds || sum(ress == tuned_resolution) > 2) {
+            # if (n_rounds > max_n_rounds) {
+            #     warning("Too many rounds of tuning clustering resolution, returned what we have.")
+            #     return(clusters_result)
+            # }
+            message("round ", n_rounds, " of tuning clustering resolution")
             if (tuned_resolution <= step_size) {
-                step_size = step_size/2
+                step_size = round(step_size/2,5)
             }
             
             if (last_nclusters > n_clusters) {
-                tuned_resolution <- round(tuned_resolution - step_size, 5)
+                tuned_resolution <- tuned_resolution - step_size
             } else {
-                tuned_resolution <- round(tuned_resolution + step_size, 5)
+                tuned_resolution <- tuned_resolution + step_size
             }
             
-            tuned_resolution = abs(tuned_resolution)
+            tuned_resolution = round(abs(tuned_resolution),5)
+            ress = c(ress, tuned_resolution)
             
             if (verbose) {
                 message(paste0("last_nclusters = ", last_nclusters, 
                             "\n tuned_resolution = ", tuned_resolution, 
-                            "\n step_size = ", step_size))
+                            "\n step_size = ", step_size,
+                            "\n n_rounds = ", n_rounds))
             }
             
             clusters_result <-
                 find_seurat_clusters(
                     seurat_obj = clusters_result$seurat_obj,
-                    pcs = pcs,
+                    npcs = npcs,
                     clustering_resolution = tuned_resolution,
-                    verbose = verbose
+                    variable.features.n = variable.features.n,
+                    verbose = verbose,
+                    mt = mt,
+                    sct = sct
                 )
             
             if ((last_nclusters > n_clusters) != (clusters_result$n_clusters > n_clusters)) {
-                step_size <- round(step_size / 1.5, 5)
+                step_size <- round(step_size / 1.5,5)
             }
             # avoid infinit loop
             last_nclusters <-
                 length(unique(clusters_result$seurat_clusters))
+            n_rounds = n_rounds + 1
         }
         clusters_result
     }
@@ -250,6 +304,7 @@ sctype <- function(clusters_result,
     
     clusters_result$sctype_clusters <-
         seurat_obj@meta.data$sctype_clusters
+    names(clusters_result$sctype_clusters) <- colnames(seurat_obj)
     clusters_result$sctype_score <- sctype_scores
     clusters_result$seurat_obj <- seurat_obj
     
@@ -259,7 +314,7 @@ sctype <- function(clusters_result,
 
 get_clusters_from_count_type_multiple <-
     function(input_dataset_list,
-             pcs = NULL,
+             npcs = NULL,
              clustering_resolution = 0.5,
              fontsize = NULL,
              metrics = c("ari", "knn_spearman"),
@@ -290,7 +345,7 @@ get_clusters_from_count_type_multiple <-
                             seurat_obj = seurat_obj,
                             n_clusters = n_clusters,
                             start_resolution = clustering_resolution,
-                            pcs = pcs,
+                            npcs = npcs,
                             verbose = verbose
                         )
                         
@@ -418,9 +473,17 @@ make_heatmaps_sub <- function(h_mtx,
     if (is.null(fontsize))
         fontsize = round(50 / ncol(h_mtx))
     # if (is.null(fontsize)) fontsize = round(log(ncol(h_mtx),15),1)
-    
+
+    if (display_numbers) {
+        dn_mtx = as.matrix(h_mtx)
+        dn_mtx[dn_mtx == 0] <- ""
+    } else {
+        dn_mtx = FALSE
+    }
+
     pheatmap(
         h_mtx,
+        border_color ="white",
         cluster_rows = FALSE,
         cluster_cols = FALSE,
         angle_col = angle_col,
@@ -429,7 +492,7 @@ make_heatmaps_sub <- function(h_mtx,
         breaks = my.breaks,
         main = main,
         silent = TRUE,
-        display_numbers = display_numbers,
+        display_numbers = dn_mtx,
         legend = FALSE,
         fontsize = fontsize,
         ...
@@ -470,26 +533,46 @@ compute_metric <- function(clusters_result_list, fn) {
     # init matrix
     h_mtx <- matrix(
         0,
-        nrow = length(clusters_result_list),
-        ncol = length(clusters_result_list)
+        nrow = length(clusters_result_list)-1,
+        ncol = length(clusters_result_list)-1
     )
-    colnames(h_mtx) <-
-        rownames(h_mtx) <- sapply(clusters_result_list, function(x)
-            x$name)
+    colnames(h_mtx) <- sapply(clusters_result_list, function(x) x$name)[-1]
+    rownames(h_mtx) <- sapply(clusters_result_list, function(x) x$name)[-length(clusters_result_list)]
+    
+    # h_mtx <- matrix(
+    #     0,
+    #     nrow = length(clusters_result_list),
+    #     ncol = length(clusters_result_list)
+    # )
+    # colnames(h_mtx) <- sapply(clusters_result_list, function(x) x$name)
+    # rownames(h_mtx) <- sapply(clusters_result_list, function(x) x$name)
     
     # compute similarity
-    for (c_std in 1:length(clusters_result_list)) {
-        for (c_query in c_std:length(clusters_result_list)) {
+    for (c_std in 1:(length(clusters_result_list)-1)) {
+        for (c_query in (c_std+1):length(clusters_result_list)) {
             # ARI
-            ari <- round(
+            # std = clusters_result_list[[c_std]]$clusters_result$seurat_clusters
+            # if (is.null(std)) {
+                std = as.numeric(Idents(clusters_result_list[[c_std]]$clusters_result$seurat_obj))
+            # }
+            names(std) = colnames(clusters_result_list[[c_std]]$clusters_result$seurat_obj)
+            # query = clusters_result_list[[c_query]]$clusters_result$seurat_clusters
+            # if (is.null(query)) {
+                query = as.character(Idents(clusters_result_list[[c_query]]$clusters_result$seurat_obj))
+            # }
+            names(query) = colnames(clusters_result_list[[c_query]]$clusters_result$seurat_obj)
+            intersection = intersect(names(std), names(query))
+            std = std[intersection]
+            query = query[intersection]
+
+            ari <- max(round(
                 fn(
-                    as.numeric(clusters_result_list[[c_std]]$clusters_result$seurat_clusters),
-                    as.numeric(clusters_result_list[[c_query]]$clusters_result$seurat_clusters)
+                    as.numeric(std),
+                    as.numeric(query)
                 ),
                 2
-            )
-            h_mtx[c_std, c_query] <- ari
-            h_mtx[c_query, c_std] <- ari
+            ),0.01) # 0.001 to avoid not printing the number in the heatmap
+            h_mtx[c_std, c_query-1] <- ari
         }
     }
     h_mtx
@@ -538,7 +621,7 @@ make_heatmaps <- function(clusters_result_list,
     # ari
     if ("ari" %in% metrics) {
         # ari_h_mtx <- compute_ari(clusters_result_list)
-        ari_h_mtx <- compute_metric(clusters_result_list, aricode::ARI)
+        ari_h_mtx <- compute_metric(clusters_result_list, adjustedRandIndex) # aricode::ARI)
         result_list$ari_heatmap <- make_heatmaps_sub(h_mtx = ari_h_mtx,
                                    main = paste("ARI", main),
                                    fontsize = fontsize,
@@ -565,13 +648,13 @@ make_heatmaps <- function(clusters_result_list,
 
     # FMI
     if ("fmi" %in% metrics) {
-        # clevr::fowlkes_mallows
         fmi_h_mtx <- compute_metric(clusters_result_list, dendextend::FM_index)
         result_list$fmi_heatmap <- make_heatmaps_sub(h_mtx = fmi_h_mtx,
                                         main = paste("FMI", main),
                                         fontsize = fontsize,
                                         ...)
     }
+
     result_list
 }
 
@@ -732,7 +815,7 @@ find_clusters_for_all <-
              nfeatures = 3000,
              clustering_resolution = 0.5,
              n_threads = 2,
-             pcs = NULL,
+             npcs = NULL,
              verbose = FALSE,
              ...) {
         if (n_threads < 2) {
@@ -777,7 +860,7 @@ find_clusters_for_all <-
                     seurat_obj = seurat_obj,
                     nfeatures = nfeatures,
                     start_resolution = clustering_resolution,
-                    pcs = pcs,
+                    npcs = npcs,
                     verbose = verbose
                 )
                 
@@ -802,7 +885,7 @@ find_clusters_for_all <-
 create_multimodal_dataset_for_all <- function(pq_list,
                                               clustering_resolution = 0.5,
                                               n_threads = 2,
-                                              pcs = NULL,
+                                              npcs = NULL,
                                               verbose = FALSE,
                                               ...) {
     if (n_threads < 2) {
@@ -854,7 +937,7 @@ find_cell_types_for_all <-
     function(multimodal_dataset_list_all,
              clustering_resolution = 0.5,
              n_threads = 2,
-             pcs = NULL,
+             npcs = NULL,
              verbose = FALSE,
              ...) {
         if (n_threads < 2) {
@@ -959,7 +1042,7 @@ find_markers_for_all <-
                                             verbose = FALSE,
                                             ...
                                         )
-                                    # FindAllMarkers(object = seurat_obj, verbose = verboase, ...)
+                                    # FindAllMarkers(object = seurat_obj, verbose = verbose, ...)
                                     
                                     list(
                                         name = name,
@@ -1485,7 +1568,7 @@ find_enriched_gset_for_all <- function(deg_list_all,
                             GetAssayData(
                                 seurat_obj,
                                 assay = assay_name,
-                                slot = "data"
+                                layer = "data"
                             )
                         ),
                         y = seurat_obj[[ident_name]][, 1])

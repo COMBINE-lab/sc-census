@@ -13,7 +13,7 @@ from matplotlib import pyplot
 
 def create_dict_from_bam(bam_filename_dict: list):    
     # initialize an empty dictionary
-    cb_umi_dict = {}
+    # cb_umi_dict = {}
     cat_cbumi_dict = {}
     cat_read_dict = {}
     # iterate over each BAM file
@@ -30,9 +30,9 @@ def create_dict_from_bam(bam_filename_dict: list):
             read_name = read.query_name
             cb = read.get_tag('CB')
             umi = read.get_tag('UB')
-            if cb not in cb_umi_dict:
-                cb_umi_dict[cb] = set()
-            cb_umi_dict[cb].add(umi)
+            # if cb not in cb_umi_dict:
+            #     cb_umi_dict[cb] = set()
+            # cb_umi_dict[cb].add(umi)
             
             cbumi_set.add((cb,umi))
             read_set.add(read_name)
@@ -40,7 +40,8 @@ def create_dict_from_bam(bam_filename_dict: list):
         in_bam.close()
         cat_cbumi_dict[cat_name] = cbumi_set
         cat_read_dict[cat_name] = read_set
-    return (cat_cbumi_dict, cat_read_dict, cb_umi_dict)
+    # return (cat_cbumi_dict, cat_read_dict, cb_umi_dict)
+    return (cat_cbumi_dict, cat_read_dict)
 
 
 parser = argparse.ArgumentParser()
@@ -73,7 +74,8 @@ fig_dir = os.path.join(args.out_dir, "read_and_umi_feature_category_upset_plot")
 if not os.path.exists(fig_dir):
     os.makedirs(fig_dir)
 
-(cat_cbumi_dict, cat_read_dict, cb_umi_dict) = create_dict_from_bam(bam_filename_dict)
+(cat_cbumi_dict, cat_read_dict) = create_dict_from_bam(bam_filename_dict)
+# (cat_cbumi_dict, cat_read_dict, cb_umi_dict) = create_dict_from_bam(bam_filename_dict)
 
 # plot the upset plot
 # UMI
@@ -83,7 +85,7 @@ for (cat_name, read_set) in cat_cbumi_dict.items():
     num_umis += len(read_set)
 
 in_data = from_contents(cat_cbumi_dict)
-UpSet(in_data, subset_size='count').plot()
+UpSet(in_data, subset_size='count',show_percentages = True).plot()
 # pyplot.show()
 pyplot.title("".join(["The compatible feature categories of UMIs (Total # of UMIs: ", str(num_umis), ")"]))
 pyplot.savefig(os.path.join(fig_dir, "UMI_category_upsetplot.pdf"))
@@ -100,7 +102,7 @@ UpSet(in_data, subset_size='count',show_percentages = True).plot()
 pyplot.title("".join(["The compatible feature categories of Reads (Total # of reads: ", str(num_reads), ")"]))
 pyplot.savefig(os.path.join(fig_dir , "read_category_upsetplot.pdf"))
 
-pickle.dump(cb_umi_dict, open(os.path.join(args.out_dir, "cb-umi_dict.pickle"), "wb"))
+# pickle.dump(cb_umi_dict, open(os.path.join(args.out_dir, "cb-umi_dict.pickle"), "wb"))
 # pickle.dump(cat_cbumi_dict, open(os.path.join(args.out_dir, "cat-cbumi_dict.pickle"), "wb"))
 # pickle.dump(cat_read_dict, open(os.path.join(args.out_dir, "cat-read_dict.pickle"), "wb"))
 

@@ -12,10 +12,13 @@ output:
         self_contained: true
 
 params:
-    celltypist_csv: null
-    quant_dir: null
+    utils_path: null
+    sctype_csv: null
+    fw_quant_dir: null
+    rc_quant_dir: null
     out_dir: null
     sample_type: null
+    cells_or_nuclei: null
     num_threads: 1
     num_pcs: 50
     logfc.threshold: 0.25
@@ -31,15 +34,6 @@ if (!require("findPC")) {
     devtools::install_github("haotian-zhuang/findPC")
 }
 
-if (!require("clevr")) {
-    install.packages("clevr", verbose = FALSE, quiet = TRUE)
-}
-
-# if (!require("ggVennDiagram")) {
-#     install.packages("ggVennDiagram", verbose = FALSE, quiet = TRUE)
-# }
-
-
 suppressPackageStartupMessages({
     library(fishpond)
     library(Seurat)
@@ -54,31 +48,41 @@ suppressPackageStartupMessages({
     library(HGNChelper)
     library(ggVennDiagram)
     library(UpSetR)
+    library(grid)
 })
 
+# sample_name = "10k_PBMC_Multiome_nextgem_Chromium_X"
+# output_dir = "/fs/nexus-projects/sc_read_census/nextflow/workflow_output"
+# ref_type = "refdata-gex-GRCh38-2020-A"
 
-sample_type_to_tissue_dict <- list(
-    human_pbmc = "Immune system",
-    huamn_bmmc = "Immune system",
-    human_brain = "Brain",
-)
+# params = list(
+#     sctype_csv = file.path(output_dir, "downstream_analysis", "sctype_predictions", sample_name, ref_type, "sctype_out", "sctype_predictions.csv"),
+#     utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+#     fw_quant_dir = file.path(output_dir, "quantification", sample_name,  ref_type, "simpleaf_quant", "fw_af_quant"),
+#     rc_quant_dir = "rc",
+#     out_dir = "/fs/nexus-projects/sc_read_census/nextflow/work/test/clustering_analysis",
+#     cells_or_nuclei = "nuclei",
+#     sample_type = "human_pbmc",
+#     num_threads = 30,
+#     num_pcs = 50
+# )
 
-params = list(
-    celltypist_csv = "celltypist_predictions.csv",
-    utils_path = "/nfshomes/zaza/cbcb-scratch/Projects/sc_read_concensus/nextflow/modules/downstream_analysis/r_utils.R",
-    quant_dir = ".",
-    out_dir = ".",
-    sample_type = "cell",
-    num_threads = 10,
-    num_pcs = 50,
-    high_clustering_resolution = 0.8,
-    mid_clustering_resolution = 0.5,
-    low_clustering_resolution = 0.2,
-    logfc.threshold = 0.25
-)
+
+# params = list(
+#     sctype_csv = "sctype_predictions.csv",
+#     utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+#     fw_quant_dir = "fw",
+#     rc_quant_dir = "rc",
+#     out_dir = "clustering_analysis",
+#     cells_or_nuclei = "nuclei",
+#     num_threads = 30,
+#     num_pcs = 50
+# )
 
 source(params$utils_path)
 ```
+
+
 ## Introduction
 
 Clustering analysis is an important data analysis type in scRNA-seq analysis. Conventionally, this analysis utlizes the ``conventional" gene expression count matrix -- the spliced+ambiguous (SA) UMI count matrix for single-cell samples, and spliced+unspliced+ambiguous (USA) UMI count matrix for single-nucleus samples. Recently, Cell Ranger started to use the spliced+unspliced+ambiguous UMI count matrix as the default setting for both single-cell and single-nucleus samples. They also posted a technical note showing that this changes can improve the gene discovery rate, and at the same time does not affect the clustering results.
@@ -87,7 +91,7 @@ In this analysis, we want to show that
 1. this change, from SA to USA, does affect the clustering results in single-cell samples, and it will affect the differentially expressed genes discovered in each cluster/cell type.
 2. extending from the first point, we want to show that, when fixing the number of clusters, the clustering results using different count matrices, including open chromatin region-assotiated count matrices, are similar but not identical, and the differentially expressed genes discovered in each cluster/cell type are different. Here we tested three set of cluster sizes: a low number of clusters, a medium number of clusters, and a high number of clusters. 
     - low number of clusters: the number of clsuters taht can be easily identified by eye-balling the tSNE/UMAP plot
-    - medium number of clusters: the number of cell types identified by celltypist or sctype using the conventional count matrix: SA for single-cell samples, and USA for single-nucleus samples.
+    - medium number of clusters: the number of cell types identified by sctype or sctype using the conventional count matrix: SA for single-cell samples, and USA for single-nucleus samples.
     - high number of clusters: $1.5$ times the medium number of clusters.
 3. we want to comment on a recent paper about concatenating SA and U as the input for clustering analysis (https://www.biorxiv.org/content/10.1101/2023.09.17.558131v2.full.pdf). We want to show that when fixing the number of clusters, all count matrices will give similar clustering results, and the differentially expressed genes discovered in each cluster/cell type are different. For the USA matrix, we want to show its DEGs almost forms a superset of the DEGs in the SA matrix and U matrix, and their methods just generated another very similar results.
 
@@ -116,9 +120,6 @@ n_threads <- params$num_threads
 
 # pipeline
 verbose <- FALSE
-high_clustering_resolution <- params$high_clustering_resolution
-mid_clustering_resolution <- params$mid_clustering_resolution
-low_clustering_resolution <- params$low_clustering_resolution
 logfc.threshold = params$logfc.threshold
 
 metrics = c("ari", "fmi", "nmi")
@@ -126,16 +127,23 @@ metrics = c("ari", "fmi", "nmi")
 ```
 
 ```{r load_data}
-sce = loadFry(params$quant_dir, outputFormat = "raw")
-gid2name_df <- read.csv(file.path(params$quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
+sce = loadFry(file.path(params$fw_quant_dir), outputFormat = "raw")
+
+sce = sce[,(colSums(sce@assays@data$spliced) > 3 & colSums(sce@assays@data$unspliced) > 3 & colSums(sce@assays@data$ambiguous) > 3)]
+
+gid2name_df <- read.csv(file.path(params$fw_quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
 
 # we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
 rownames(sce) <- make.unique(gid2name_df[match(rownames(sce), gid2name_df[,1]),2])
 ```
 
-```{r load_celltypist}
-celltypist_df <- read.csv(params$celltypist_csv, stringsAsFactors = FALSE)
-sce = sce[,colnames(sce) %in% celltypist_df$barcode]
+```{r load_sctype}
+sctype_df <- read.csv(params$sctype_csv, stringsAsFactors = FALSE)
+sce = sce[,sctype_df$barcode]
+
+print(paste0("Total spliced count: ", sum(sce@assays@data$spliced)))
+print(paste0("Total unspliced count: ", sum(sce@assays@data$unspliced)))
+print(paste0("Total ambiguous count: ", sum(sce@assays@data$ambiguous)))
 ```
 
 ## create Seurat objects
@@ -148,34 +156,29 @@ We will have three versions of the counts
 - A: Ambiguous count
 
 Then, we will use these count matrices to find cell clusters. We will find three sets of clusters, each set with a different number of clusters. The three sets of clusters are:
-- low number of clusters: 1/3 of the number of cell types discovered by celltypist
-- medium number of clusters: the number of cell types discovered by celltypist1
-- high number of clusters: 1.5 times the number of cell types discovered by celltypist
+- low number of clusters: 1/3 of the number of cell types discovered by sctype
+- medium number of clusters: the number of cell types discovered by sctype1
+- high number of clusters: 1.5 times the number of cell types discovered by sctype
 
 We wish to show that when the resolution is low, the clustering result of all count matrices agree with each other. However, when increase the resolution, the clustering results of different count matrices will be different.
 
 ```{r create_seurat_objects}
-if (n_threads < 2) {
-    registerDoSEQ()
-} else {
-    registerDoParallel(cores = n_threads)
-}
 
 seurat_obj_list <- list(
     USA = list(
-        count_type = "USA",
+        count_type = paste0("USA", if(params$cells_or_nuclei == "nuclei"){"(STD)"}else{""}),
         seurat_obj = create_seurat_obj(
             m = sce@assays@data$spliced + sce@assays@data$unspliced + sce@assays@data$ambiguous,
             sce = sce,
-            project = "USA"
+            project = paste0("USA", if(params$cells_or_nuclei == "nuclei"){"(STD)"}else{""})
         )
     ),
     SA = list(
-        count_type = "SA",
+        count_type = paste0("SA", if(params$cells_or_nuclei == "cells"){"(STD)"}else{""}),
         seurat_obj = create_seurat_obj(
             m = sce@assays@data$spliced + sce@assays@data$ambiguous,
             sce = sce,
-            project = "SA"
+            project = paste0("SA", if(params$cells_or_nuclei == "cells"){"(STD)"}else{""})
         )
     ),
     U = list(
@@ -204,34 +207,65 @@ seurat_obj_list <- list(
     )
 )
 
-n_celltypist_clusters = length(unique(celltypist_df$majority_voting))
+```
 
-all_clusters_result_list <- foreach(n_clusters = c(floor(n_celltypist_clusters/2),n_celltypist_clusters, ceiling(n_celltypist_clusters * 1.5)), .combine = "c") %dopar% {
-    # create clusters result list
-    clusters_result_list <-
-        foreach(seurat_obj_set = seurat_obj_list, .combine = "c") %dopar% {
-            seurat_obj <- seurat_obj_set$seurat_obj
-            count_type <- seurat_obj_set$count_type
+```{r find_clusters}
 
-            result_list = list()
-            result_list[[count_type]]$name <- count_type
-            result_list[[count_type]]$clusters_result <- seurat_clusters(
-                seurat_obj = seurat_obj,
-                n_clusters = n_clusters
-            )
-            result_list
-        }
+if (params$num_threads < 2) {
+    registerDoSEQ()
+} else {
+    registerDoParallel(cores = params$num_threads)
+}
+n_sctype_clusters = length(unique(sctype_df$cell_type))
+
+n_clusters_vec = rep(
+    c(
+        max(floor(n_sctype_clusters* 0.2),3), 
+        max(floor(n_sctype_clusters*0.6),7),
+        n_sctype_clusters
+    ),
+    length(seurat_obj_list)
+)
+
+name_list = rep(names(seurat_obj_list), each = 3)
+
+interm_clusters_result_list = foreach (it_id = seq(1, length(name_list)) , .combine = "c") %dopar% {
+    n_clusters = n_clusters_vec[it_id]
+    count_type = name_list[it_id]
+    seurat_obj = seurat_obj_list[[count_type]]$seurat_obj
+    print(paste0("Finding clusters for ", count_type, " count matrix with ", n_clusters, " clusters"))        
+    
+    result_list = list()
+    result_list[[count_type]]$name <- count_type
+    result_list[[count_type]]$clusters_result <- seurat_clusters(
+        seurat_obj = seurat_obj,
+        n_clusters = n_clusters,
+        step_size = 0.4,
+        verbose = FALSE
+    )
+
+    out_list = list()
+    out_list[[as.character(n_clusters)]] = result_list
+    out_list
+}
+
+all_clusters_result_list = list()
+
+for (n_clusters in unique(names(interm_clusters_result_list))) {
+    clusters_result_list = lapply(interm_clusters_result_list[which(names(interm_clusters_result_list) == n_clusters)], function(x) x[[1]])
+    names(clusters_result_list) = sapply(clusters_result_list, function(x) x$name)
 
     heatmap_list <- make_heatmaps(
         clusters_result_list = clusters_result_list,
         main = paste0("(", n_clusters, " clusters)"),
         dataset_id = "my_data",
         metrics = metrics,
-        fontsize = 10
+        fontsize = 15
     )
 
     dir.create(file.path(heatmap_dir, paste0(n_clusters,"_clusters")), recursive = TRUE, showWarnings = FALSE)
     for (metric in paste0(metrics, "_heatmap")) {
+
         pdf(file.path(heatmap_dir, 
                         paste0(n_clusters,"_clusters"), 
                         paste0(metric,".pdf")
@@ -240,84 +274,146 @@ all_clusters_result_list <- foreach(n_clusters = c(floor(n_celltypist_clusters/2
             # width = 10,
             # height = 10
         )
-        plot(heatmap_list[[metric]])
+        
+        # Draw the heatmap
+        grid::grid.draw(rectGrob(gp=gpar(fill="white", lwd=0)))
+        grid::grid.draw(heatmap_list[[metric]])
         dev.off()
     }
-    out_list = list()
 
-    out_list[[as.character(n_clusters)]] = list(
+    all_clusters_result_list[[as.character(n_clusters)]] = list(
         n_clusters = n_clusters,
         clusters_result_list = clusters_result_list,
         heatmap_list = heatmap_list
     )
-
-    out_list
 }
+
 
 ```
 
-## Next, just for visualization purpose, we plot the tSNE/UMAP plot for each count matrix using celltypist clusters
+## Next, just for visualization purpose, we plot the tSNE/UMAP plot for each count matrix using sctype clusters
 
 ```{r plot_dim_reduction}
 
-cell_to_cluster_map = celltypist_df[,c("majority_voting")]
+for (cid in names(all_clusters_result_list)) {
+    dir.create(file.path(umap_dir, cid), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(tsne_dir, cid), recursive = TRUE, showWarnings = FALSE)
 
-names(cell_to_cluster_map) <- celltypist_df[,c("barcodes")]
+    # cell_to_cluster_map = all_clusters_result_list[[cid]]$clusters_result_list[[if(params$cells_or_nuclei == "cells"){"SA"}else{"USA"}]]$clusters_result$seurat_clusters
+    # names(cell_to_cluster_map) <- colnames(all_clusters_result_list[[cid]]$clusters_result_list[[if(params$cells_or_nuclei == "cells"){"SA"}else{"USA"}]]$clusters_result$seurat_obj)
 
-clusters_result_list = foreach (clusters_result_set=all_clusters_result_list[[as.character(n_celltypist_clusters)]]$clusters_result_list, .combine = "c") %dopar% {
+    cell_to_cluster_map = Idents(all_clusters_result_list[[cid]]$clusters_result_list[[if(params$cells_or_nuclei == "cells"){"SA"}else{"USA"}]]$clusters_result$seurat_obj)
+    
+    foreach (clusters_result_set=all_clusters_result_list[[cid]]$clusters_result_list, .combine = "c") %dopar% {
+        seurat_obj <- clusters_result_set$clusters_result$seurat_obj
+        count_type <- clusters_result_set$name
+        seurat_obj <- AddMetaData(
+            object = seurat_obj,
+            metadata = cell_to_cluster_map[colnames(seurat_obj)],
+            col.name = "standard_clusters"
+        )
+        seurat_obj <- RunUMAP(
+            object = seurat_obj,
+            dims = 1:clusters_result_set$clusters_result$npcs,
+            verbose = FALSE
+        )
+        seurat_obj <- RunTSNE(
+            object = seurat_obj,
+            dims = 1:clusters_result_set$clusters_result$npcs,
+            verbose = FALSE,
+        check_duplicates = FALSE
+        )
+        
+        Idents(seurat_obj) <- "seurat_clusters"
+        su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by seurat clusters found using ", count_type, " counts"))
+        st = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by seurat clusters found using ", count_type, " counts"))
+
+        Idents(seurat_obj) <- "standard_clusters"
+        cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by standard counts"))
+        ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by standard counts"))
+
+        # plot tSNE
+        pdf(file.path(tsne_dir,cid,paste0(count_type,"_tSNE.pdf")),width = 12,height = 6)
+        print(ggarrange(plotlist = list(st,ct)))
+        dev.off()
+
+        # plot UMAP
+        pdf(file.path(umap_dir,cid,paste0(count_type,"_UMAP.pdf")),width = 12,height = 6)
+        print(ggarrange(plotlist = list(su,cu)))
+        dev.off()
+        # clusters_result_set$clusters_result$seurat_obj <- seurat_obj
+
+        # clusters_result_set$heatmap_list = list(
+        #     tsne_seurat_clusters = st, 
+        #     tsne_sctype_clusters = ct, 
+        #     umap_seurat_clusters = su, 
+        #     umap_sctype_clusters = cu
+        # )
+        # out_list = list()
+        # out_list[[count_type]] = clusters_result_set
+        # out_list
+    }
+}
+
+
+```
+
+```{r plot_dim_reduction_heatmap_celltypes}
+
+# Then we do the same thing for the cell types
+
+dir.create(file.path(umap_dir, "sctype"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(tsne_dir, "sctype"), recursive = TRUE, showWarnings = FALSE)
+
+foreach (clusters_result_set=all_clusters_result_list[[cid]]$clusters_result_list, .combine = "c") %dopar% {
     seurat_obj <- clusters_result_set$clusters_result$seurat_obj
+    seurat_obj <- seurat_obj[,sctype_df$barcode]
     count_type <- clusters_result_set$name
-
     seurat_obj <- AddMetaData(
         object = seurat_obj,
-        metadata = cell_to_cluster_map[colnames(seurat_obj)],
-        col.name = "celltypist_clusters"
+        metadata = sctype_df$cell_type,
+        col.name = "standard_clusters"
     )
     seurat_obj <- RunUMAP(
         object = seurat_obj,
-        dims = clusters_result_set$clusters_result$pcs,
+        dims = 1:clusters_result_set$clusters_result$npcs,
         verbose = FALSE
     )
     seurat_obj <- RunTSNE(
         object = seurat_obj,
-        dims = clusters_result_set$clusters_result$pcs,
-        verbose = FALSE
+        dims = 1:clusters_result_set$clusters_result$npcs,
+        verbose = FALSE,
+        check_duplicates = FALSE
     )
     
     Idents(seurat_obj) <- "seurat_clusters"
-    su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0(count_type, " counts UMAP plot colored by seurat clusters"))
-    st = DimPlot(seurat_obj, reduction = "tsne")  + patchwork::plot_annotation(title = paste0(count_type, " counts tSNE plot colored by seurat clusters"))
+    su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by seurat clusters found using ", count_type, " counts"))
+    st = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by seurat clusters found using ", count_type, " counts"))
 
-    Idents(seurat_obj) <- "celltypist_clusters"
-    cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0(count_type, " counts UMAP plot colored by celltypist clusters"))
-    ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0(count_type, " counts tSNE plot colored by celltypist clusters"))
+    Idents(seurat_obj) <- "standard_clusters"
+    cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by cell types"))
+    ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by cell types"))
 
     # plot tSNE
-    pdf(file.path(tsne_dir,paste0(count_type,"_tSNE.pdf")),width = 20,height = 10)
+    pdf(file.path(tsne_dir,"sctype",paste0(count_type,"_tSNE.pdf")),width = 12,height = 6)
     print(ggarrange(plotlist = list(st,ct)))
     dev.off()
-    tsne_plot_list = c(tsne_plot_list, st)
-    tsne_plot_list = c(tsne_plot_list, ct)
 
     # plot UMAP
-    pdf(file.path(umap_dir,paste0(count_type,"_UMAP.pdf")),width = 20,height = 10)
+    pdf(file.path(umap_dir,"sctype",paste0(count_type,"_UMAP.pdf")),width = 12,height = 6)
     print(ggarrange(plotlist = list(su,cu)))
     dev.off()
-    
-    umap_plot_list = c(umap_plot_list, su)
-    umap_plot_list = c(umap_plot_list, cu)
+    # clusters_result_set$clusters_result$seurat_obj <- seurat_obj
 
-    clusters_result_set$clusters_result$seurat_obj <- seurat_obj
-
-    clusters_result_set$heatmap_list = list(
-        tsne_seurat_clusters = st, 
-        tsne_celltypist_clusters = ct, 
-        umap_seurat_clusters = su, 
-        umap_celltypist_clusters = cu
-    )
-    out_list = list()
-    out_list[[count_type]] = clusters_result_set
-    out_list
+    # clusters_result_set$heatmap_list = list(
+    #     tsne_seurat_clusters = st, 
+    #     tsne_sctype_clusters = ct, 
+    #     umap_seurat_clusters = su, 
+    #     umap_sctype_clusters = cu
+    # )
+    # out_list = list()
+    # out_list[[count_type]] = clusters_result_set
+    # out_list
 }
 
 ```
@@ -326,19 +422,21 @@ clusters_result_list = foreach (clusters_result_set=all_clusters_result_list[[as
 
 In this section, we find the marker genes for each cluster/cell type in each count matrix, and compare the DEGs discovered for each cell type across count matrices.
 
-To make the DEGs from different count matrices comparable, we will use the same clustering results for all count matrices. We will use the clustering results from celltypist.
+To make the DEGs from different count matrices comparable, we will use the same clustering results for all count matrices. We will use the clustering results from sctype.
 
 ```{r create_DEG_list}
 # we find markers using each of the count types for each of the identification sets
+
+
 verbose = TRUE
 marker_df_list <-
-    foreach(clusters_result_set = clusters_result_list, .combine=c) %dopar% {
+    foreach(clusters_result_set = all_clusters_result_list[[as.character(n_sctype_clusters)]]$clusters_result_list, .combine=c) %dopar% {
         if (verbose)
             message(paste0("  - Finding markers for ", clusters_result_set$name))
         
         seurat_obj <-
-            clusters_result_set$clusters_result$seurat_obj
-        Idents(seurat_obj) <- "celltypist_clusters"
+            clusters_result_set$clusters_result$seurat_obj[,sctype_df$barcode]
+        Idents(seurat_obj) <- sctype_df$cell_type
         
         # we find markers for each of the identification set
         all_markers_df <- FindAllMarkers(
@@ -369,8 +467,7 @@ for (marker_df_set in marker_df_list) {
             assay_name = marker_df_set$name,
             only_positive = FALSE,
             report_size = 100,
-            report_size_factor = 2,
-            assays.use.report_size_factor = c("USA")
+            report_size_factor = 2
         )
         
         if (nrow(deg_df) > 0) {
@@ -428,7 +525,7 @@ for (cell_type in names(cell_type_count_type_marker_list)) {
         #         labs(title = cell_type) +
         #         theme(legend.position = "none")
             
-        #     pdf(file.path(dataset_vd_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")),width = 20,height = 10)
+        #     pdf(file.path(dataset_vd_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")),width = 12,height = 6)
         #     print(plotlist[[cell_type]])
         #     dev.off()
         # }
@@ -438,6 +535,58 @@ for (cell_type in names(cell_type_count_type_marker_list)) {
 ```
 
 
+#### check DEG with makers
+
+```{r check_DEG_with_markers}
+
+tissue = if(params$sample_type == "human_pbmc" | params$sample_type == "human_bmmc"){"Immune system"}else{"Brain"}
+
+# load gene set preparation function
+source(
+    "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R"
+)
+# load cell type annotation function
+source(
+    "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R"
+)
+db_ <-
+    "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx"
+
+
+# prepare gene sets
+suppressWarnings({
+    suppressMessages({
+        gs_list <- gene_sets_prepare(db_, tissue)
+    })
+})
+
+sctype_markers_list = gs_list$gs_positive
+
+
+for (ct in names(cell_type_count_type_marker_list)) {
+    cat(paste0("Cell type: ", ct, "\n"))
+
+    deg_list = cell_type_count_type_marker_list[[ct]]
+    marker_list = sctype_markers_list[ct]
+    for (count_type in names(deg_list)) {
+        deg_vec = deg_list[[count_type]]
+        marker_vec = marker_list[[ct]]
+        if (length(intersect(deg_vec, marker_vec)) > 0) {
+            cat(paste0("count type: ", count_type, "\n"))
+            cat(paste0("  - DEGs + markers: ", paste(deg_vec[deg_vec %in% marker_vec], collapse = ", "), "\n"))
+        }
+    }
+        cat(paste0( "\n"))
+
+}
+
+
+
+```
+
+```{r}
+knitr::knit_exit()
+```
 
 
 

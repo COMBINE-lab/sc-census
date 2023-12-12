@@ -10,6 +10,7 @@
 include {transcript_composition_analysis} from "./modules/transcript_composition_analysis"
 include {read_alignment_analysis} from "./modules/read_alignment_analysis"
 include {quantification} from "./modules/quantification"
+include {downstream_analysis} from "./modules/downstream_analysis"
 
 workflow {
   // ##################################
@@ -28,5 +29,7 @@ workflow {
   // 3. quantification
   // #################
   quantification(read_alignment_analysis.out)
+
+  downstream_analysis(quantification.out)
   
 }

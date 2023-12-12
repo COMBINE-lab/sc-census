@@ -1,0 +1,576 @@
+---
+title: "Correlating ATAC-seq peak count with OCR-associated count"
+author: "Dongze He, Steve M. Mount, and Rob Patro"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        code_folding: hide
+        fig_caption: true
+        self_contained: true
+
+params:
+    utils_path : null
+    celltypist_csv: null
+    atac_count_dir : null
+    ocr_count_intergenic_dir : null
+    ocr_count_non_coding_dir : null
+    ocr_count_not_sense_coding_dir : null
+    ocr_count_all_dir : null
+    ccres_count_intergenic_dir : null
+    ccres_count_non_coding_dir : null
+    ccres_count_not_sense_coding_dir : null
+    ccres_count_all_dir : null
+    out_dir : "atac_ocr_correlation"
+    sample_type : null
+    num_threads : 1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_library}
+
+suppressPackageStartupMessages({
+    library(Seurat)
+    # library(Signac)
+    library(Seurat)
+    library(GenomicFeatures)
+    library(ggpubr)
+})
+
+
+# sample = "10k_PBMC_Multiome_nextgem_Chromium_X"
+
+# params = list(
+#     utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+#     celltypist_csv = "celltypist_predictions.csv",
+#     intergenic_count_dir = "intergenic_count",
+#     ocr_count_intergenic_dir = "ocr_count_intergenic",
+#     ocr_count_non_coding_dir = "ocr_count_non_coding",
+#     ocr_count_not_sense_coding_dir = "ocr_count_not_sense_coding",
+#     ocr_count_all_dir = "ocr_count_all",
+#     out_dir = "atac_ocr_correlation",
+#     simpleaf_count_dir = "fw_af_quant",
+#     atac_count_dir = file.path("/fs/nexus-projects/sc_read_census/nextflow/data/datasets", sample, "filtered_feature_bc_matrix"),
+#     sample_type = "nuclei",
+#     num_threads = 32,
+#     num_pcs = 50,
+#     logfc.threshold = 0.25,
+#     read_peak_dist_threshold = 8000
+# )
+
+```
+
+create output directories
+
+```{r create_output_dir}
+
+hist_dir <- file.path(params$out_dir, "histograms")
+dir.create(hist_dir,  recursive = TRUE, showWarnings = FALSE)
+
+heatmap_dir <- file.path(params$out_dir, "similarity_score_heatmaps")
+deg_dir <- file.path(params$out_dir,"DEG_results")
+dim_reduc_dir <- file.path(params$out_dir, "dim_reduction_plots")
+umap_dir <- file.path(dim_reduc_dir, "umap_plots")
+tsne_dir <- file.path(dim_reduc_dir, "tsne_plots")
+rds_dir <- file.path(params$out_dir, "rds")
+dir.create(heatmap_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(dim_reduc_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(umap_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tsne_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(deg_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(rds_dir,  recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+
+# we use fishpond to load simpleaf count matrix and Seurat Read10X to load others
+filtered_mtx = Read10X(file.path(params$atac_count_dir))
+atac_count = filtered_mtx$Peaks
+common_cells = colnames(atac_count)
+
+# load ocr count matrices
+ocr_count_intergenic = Read10X(params$ocr_count_intergenic_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_intergenic)[colSums(ocr_count_intergenic) != 0])
+common_peaks = rownames(ocr_count_intergenic)
+ocr_count_non_coding = Read10X(params$ocr_count_non_coding_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_non_coding)[colSums(ocr_count_non_coding) != 0])
+common_peaks = union(common_peaks, rownames(ocr_count_non_coding))
+ocr_count_not_sense_coding = Read10X(params$ocr_count_not_sense_coding_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_not_sense_coding)[colSums(ocr_count_not_sense_coding) != 0])
+common_peaks = union(common_peaks, rownames(ocr_count_not_sense_coding))
+ocr_count_all = Read10X(params$ocr_count_all_dir)
+common_cells = intersect(common_cells, colnames(ocr_count_all)[colSums(ocr_count_all) != 0])
+common_peaks = union(common_peaks, rownames(ocr_count_all))
+
+# filter out cells and peaks that are not in common
+atac_count = atac_count[,common_cells]
+ocr_count_intergenic = ocr_count_intergenic[rownames(ocr_count_intergenic) %in% rownames(atac_count),common_cells]
+ocr_count_non_coding = ocr_count_non_coding[rownames(ocr_count_non_coding) %in% rownames(atac_count),common_cells]
+ocr_count_not_sense_coding = ocr_count_not_sense_coding[rownames(ocr_count_not_sense_coding) %in% rownames(atac_count),common_cells]
+ocr_count_all = ocr_count_all[rownames(ocr_count_all) %in% rownames(atac_count),common_cells]
+
+
+cat(paste0("The number of UMIs in the ATAC-seq peak count matrix is ", sum(atac_count), "\n"))
+cat(paste0("The number of UMIs in the ocr intergenic count matrix is ", sum(ocr_count_intergenic), "\n"))
+cat(paste0("The number of UMIs in the ocr non-coding count matrix is ", sum(ocr_count_non_coding), "\n"))
+cat(paste0("The number of UMIs in the ocr not sense coding count matrix is ", sum(ocr_count_not_sense_coding), "\n"))
+cat(paste0("The number of UMIs in the ocr all count matrix is ", sum(ocr_count_all), "\n"))
+
+cell_count_df = data.frame(
+    "atac_count" = log10(colSums(atac_count)),
+    "ocr_intergenic" = log10(colSums(ocr_count_intergenic)),
+    "ocr_non_coding" = log10(colSums(ocr_count_non_coding)),
+    "ocr_not_sense_coding" = log10(colSums(ocr_count_not_sense_coding)),
+    "ocr_all" = log10(colSums(ocr_count_all))
+)
+
+pdf(file.path(hist_dir, "cell_count_histograms.pdf"), width = 8, height = 5)
+ggarrange(plotlist = list(
+    ggplot(cell_count_df, aes(x=atac_count))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' ATAC count",x="log10(# UMIs)"), 
+    ggplot(cell_count_df, aes(x=ocr_intergenic))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR intergenic count",x="log10(# UMIs)"),
+    ggplot(cell_count_df, aes(x=ocr_non_coding))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR non-coding count",x="log10(# UMIs)"),
+    ggplot(cell_count_df, aes(x=ocr_not_sense_coding))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR not sense coding count",x="log10(# UMIs)"),
+    ggplot(cell_count_df, aes(x=ocr_all))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR all count",x="log10(# UMIs)")
+))
+
+dev.off()
+
+```
+
+As we can see, the ATAC-seq peak count matrix is much denser than the OCR count matrics. This might cause problems in similarity calcualtion because the zeros in OCR count matrices will drag 
+
+Similarly, we can plot the non-zero fields in the count matrices.
+
+```{r}
+cell_detected_features_df = data.frame(
+    "atac_count" = log10(colSums(atac_count>0)),
+    "ocr_intergenic" = log10(colSums(ocr_count_intergenic>0)),
+    "ocr_non_coding" = log10(colSums(ocr_count_non_coding>0)),
+    "ocr_not_sense_coding" = log10(colSums(ocr_count_not_sense_coding>0)),
+    "ocr_all" = log10(colSums(ocr_count_all>0))
+)
+
+pdf(file.path(hist_dir, "cell_detected_features_histograms.pdf"), width = 8, height = 5)
+ggarrange(plotlist = list(
+    ggplot(cell_detected_features_df, aes(x=atac_count))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' ATAC detected features", x="# features"), 
+    ggplot(cell_detected_features_df, aes(x=ocr_intergenic))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR intergenic  detected features", x="# features"),
+    ggplot(cell_detected_features_df, aes(x=ocr_non_coding))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR non-coding  detected features", x="# features"),
+    ggplot(cell_detected_features_df, aes(x=ocr_not_sense_coding))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR not sense coding  detected features", x="# features"),
+    ggplot(cell_detected_features_df, aes(x=ocr_all))+geom_histogram(aes(y=after_stat(density)), colour="black", fill="white",bins = 30)+geom_density(alpha=.2, fill="#FF6666")+labs(titles = "cells' OCR all  detected features", x="# features")
+))
+
+dev.off()
+```
+
+## Associate intergenic OCR counts with ATAC-seq peak counts
+
+Because we saw that OCR count matrix contains biological meaningful signals, Here we question if there is any correlation between the OCR count matrix, which was obtained by counting the RNA-seq reads that map closely to OCR regions, and the ATAC-seq peak count matrix, which was obtained by counting the ATAC-seq reads mapping to each peak. If we are able to connect these two modalities, it will shed some lights on the integration of single-cell RNA-seq data and ATAC-seq data in the future.
+
+To avoid the overwhelming number of peaks, we will only use the peaks that are differentially expressed between cell types to calculate the correlation between the OCR count matrix and the ATAC-seq peak count matrix. If those intergenic counts are from regulatory elements, they should be highly correlated with the ATAC-seq peak counts. On the contrary, if they are from unannotated transcripts, most of them will be close to the end of annotated genes.
+
+```{r}
+set.seed(123)
+cos.sim=function(ma, mb){
+  mat=crossprod(ma, mb)
+  t1=sqrt(apply(ma, 2, crossprod))
+  t2=sqrt(apply(mb, 2, crossprod))
+  mat / outer(t1,t2)
+}
+cs = abs(cos.sim(as.matrix(atac_count[rownames(ocr_count_intergenic),]),(as.matrix(ocr_count_intergenic))))
+
+sig = sapply(1:ncol(cs), function(i) {
+    sum(cs[i,i] < cs[i,])
+})
+
+null_rand_cell = sapply(1:ncol(cs), function(i) {
+    k = sample(ncol(cs),1)
+    sum(cs[i,k] < cs[i,])
+})
+
+null_permut = sample(ncol(cs),ncol(cs), replace = TRUE)
+
+shuf_cs = abs(cos.sim(
+    as.matrix(atac_count[rownames(ocr_count_intergenic),][
+        sample(nrow(ocr_count_intergenic)), 
+        sample(ncol(ocr_count_intergenic))
+    ]),
+    (as.matrix(ocr_count_intergenic)[
+        sample(nrow(ocr_count_intergenic)), 
+        sample(ncol(ocr_count_intergenic))
+    ]
+)))
+
+null_shuf_count = sapply(1:ncol(shuf_cs), function(i) {
+    sum(shuf_cs[i,i] < shuf_cs[i,])
+})
+
+df = reshape2::melt(data.frame(
+    "sig" = sig,
+    "null_rand_cell" = null_rand_cell,
+    "null_permut" = null_permut,
+    "null_shuf_count" = null_shuf_count
+))
+
+colnames(df) = c("type", "ranking")
+
+pdf(file.path(hist_dir, paste0("rank_ocr_intergenic", ".pdf")), width = 8, height = 5)
+ggplot(df, aes(x=ranking, fill=type)) +
+    geom_density(alpha=0.4) + scale_x_discrete(name ="ranking")
+dev.off()
+
+ggplot(df, aes(x=ranking, fill=type)) +
+  geom_density(alpha=0.4) 
+```
+
+```{r}
+wilcox.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+
+```{r}
+ks.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+
+
+```{r}
+t.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+
+
+## Associate non coding OCR counts with ATAC-seq peak counts
+
+```{r}
+set.seed(123)
+cos.sim=function(ma, mb){
+  mat=crossprod(ma, mb)
+  t1=sqrt(apply(ma, 2, crossprod))
+  t2=sqrt(apply(mb, 2, crossprod))
+  mat / outer(t1,t2)
+}
+cs = abs(cos.sim(as.matrix(atac_count[rownames(ocr_count_non_coding),]),(as.matrix(ocr_count_non_coding))))
+
+sig = sapply(1:ncol(cs), function(i) {
+    sum(cs[i,i] < cs[i,])
+})
+
+null_rand_cell = sapply(1:ncol(cs), function(i) {
+    k = sample(ncol(cs),1)
+    sum(cs[i,k] < cs[i,])
+})
+
+null_permut = sample(ncol(cs),ncol(cs), replace = TRUE)
+
+shuf_cs = abs(cos.sim(
+    as.matrix(atac_count[rownames(ocr_count_non_coding),][
+        sample(nrow(ocr_count_non_coding)), 
+        sample(ncol(ocr_count_non_coding))
+    ]),
+    (as.matrix(ocr_count_non_coding)[
+        sample(nrow(ocr_count_non_coding)), 
+        sample(ncol(ocr_count_non_coding))
+    ]
+)))
+
+null_shuf_count = sapply(1:ncol(shuf_cs), function(i) {
+    sum(shuf_cs[i,i] < shuf_cs[i,])
+})
+df = reshape2::melt(data.frame(
+    "sig" = sig,
+    "null_rand_cell" = null_rand_cell,
+    "null_permut" = null_permut,
+    "null_shuf_count" = null_shuf_count
+))
+
+colnames(df) = c("type", "ranking")
+
+pdf(file.path(hist_dir, paste0("rank_ocr_non_coding", ".pdf")), width = 8, height = 5)
+ggplot(df, aes(x=ranking, fill=type)) +
+    geom_density(alpha=0.4) + scale_x_discrete(name ="ranking")
+dev.off()
+ggplot(df, aes(x=ranking, fill=type)) +
+  geom_density(alpha=0.4) 
+```
+
+```{r}
+wilcox.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+```{r}
+ks.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+
+
+```{r}
+t.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+## Associate non sense coding OCR counts with ATAC-seq peak counts
+
+Because we saw that OCR count matrix contains biological meaningful signals, Here we question if there is any correlation between the OCR count matrix, which was obtained by counting the RNA-seq reads that map closely to OCR regions, and the ATAC-seq peak count matrix, which was obtained by counting the ATAC-seq reads mapping to each peak. If we are able to connect these two modalities, it will shed some lights on the integration of single-cell RNA-seq data and ATAC-seq data in the future.
+
+To avoid the overwhelming number of peaks, we will only use the peaks that are differentially expressed between cell types to calculate the correlation between the OCR count matrix and the ATAC-seq peak count matrix. If those intergenic counts are from regulatory elements, they should be highly correlated with the ATAC-seq peak counts. On the contrary, if they are from unannotated transcripts, most of them will be close to the end of annotated genes.
+
+```{r}
+set.seed(123)
+cos.sim=function(ma, mb){
+  mat=crossprod(ma, mb)
+  t1=sqrt(apply(ma, 2, crossprod))
+  t2=sqrt(apply(mb, 2, crossprod))
+  mat / outer(t1,t2)
+}
+cs = abs(cos.sim(as.matrix(atac_count[rownames(ocr_count_not_sense_coding),]),(as.matrix(ocr_count_not_sense_coding))))
+
+sig = sapply(1:ncol(cs), function(i) {
+    sum(cs[i,i] < cs[i,])
+})
+
+null_rand_cell = sapply(1:ncol(cs), function(i) {
+    k = sample(ncol(cs),1)
+    sum(cs[i,k] < cs[i,])
+})
+
+null_permut = sample(ncol(cs),ncol(cs), replace = TRUE)
+
+
+shuf_cs = abs(cos.sim(
+    as.matrix(atac_count[rownames(ocr_count_not_sense_coding),][
+        sample(nrow(ocr_count_not_sense_coding)), 
+        sample(ncol(ocr_count_not_sense_coding))
+    ]),
+    (as.matrix(ocr_count_not_sense_coding)[
+        sample(nrow(ocr_count_not_sense_coding)), 
+        sample(ncol(ocr_count_not_sense_coding))
+    ]
+)))
+
+null_shuf_count = sapply(1:ncol(shuf_cs), function(i) {
+    sum(shuf_cs[i,i] < shuf_cs[i,])
+})
+
+df = reshape2::melt(data.frame(
+    "sig" = sig,
+    "null_rand_cell" = null_rand_cell,
+    "null_permut" = null_permut,
+    "null_shuf_count" = null_shuf_count
+))
+
+colnames(df) = c("type", "ranking")
+
+pdf(file.path(hist_dir, paste0("rank_ocr_not_sense_coding", ".pdf")), width = 8, height = 5)
+ggplot(df, aes(x=ranking, fill=type)) +
+    geom_density(alpha=0.4) + scale_x_discrete(name ="ranking")
+dev.off()
+
+ggplot(df, aes(x=ranking, fill=type)) +
+  geom_density(alpha=0.4) 
+```
+
+```{r}
+wilcox.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+```{r}
+ks.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+
+
+```{r}
+t.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+## Associate all OCR counts with ATAC-seq peak counts
+
+Because we saw that OCR count matrix contains biological meaningful signals, Here we question if there is any correlation between the OCR count matrix, which was obtained by counting the RNA-seq reads that map closely to OCR regions, and the ATAC-seq peak count matrix, which was obtained by counting the ATAC-seq reads mapping to each peak. If we are able to connect these two modalities, it will shed some lights on the integration of single-cell RNA-seq data and ATAC-seq data in the future.
+
+To avoid the overwhelming number of peaks, we will only use the peaks that are differentially expressed between cell types to calculate the correlation between the OCR count matrix and the ATAC-seq peak count matrix. If those intergenic counts are from regulatory elements, they should be highly correlated with the ATAC-seq peak counts. On the contrary, if they are from unannotated transcripts, most of them will be close to the end of annotated genes.
+
+```{r}
+
+set.seed(123)
+cos.sim=function(ma, mb){
+  mat=crossprod(ma, mb)
+  t1=sqrt(apply(ma, 2, crossprod))
+  t2=sqrt(apply(mb, 2, crossprod))
+  mat / outer(t1,t2)
+}
+cs = abs(cos.sim(as.matrix(atac_count[rownames(ocr_count_all),]),(as.matrix(ocr_count_all))))
+
+sig = sapply(1:ncol(cs), function(i) {
+    sum(cs[i,i] < cs[i,])
+})
+
+null_rand_cell = sapply(1:ncol(cs), function(i) {
+    k = sample(ncol(cs),1)
+    sum(cs[i,k] < cs[i,])
+})
+
+null_permut = sample(ncol(cs),ncol(cs), replace = TRUE)
+
+shuf_cs = abs(cos.sim(
+    as.matrix(atac_count[rownames(ocr_count_all),][
+        sample(nrow(ocr_count_all)), 
+        sample(ncol(ocr_count_all))
+    ]),
+    (as.matrix(ocr_count_all)[
+        sample(nrow(ocr_count_all)), 
+        sample(ncol(ocr_count_all))
+    ]
+)))
+
+null_shuf_count = sapply(1:ncol(shuf_cs), function(i) {
+    sum(shuf_cs[i,i] < shuf_cs[i,])
+})
+
+df = reshape2::melt(data.frame(
+    "sig" = sig,
+    "null_rand_cell" = null_rand_cell,
+    "null_permut" = null_permut,
+    "null_shuf_count" = null_shuf_count
+))
+
+colnames(df) = c("type", "ranking")
+
+pdf(file.path(hist_dir, paste0("rank_ocr_all", ".pdf")), width = 8, height = 5)
+ggplot(df, aes(x=ranking, fill=type)) +
+    geom_density(alpha=0.4) + scale_x_discrete(name ="ranking")
+dev.off()
+
+ggplot(df, aes(x=ranking, fill=type)) +
+  geom_density(alpha=0.4) 
+```
+
+```{r}
+wilcox.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+wilcox.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+
+```{r}
+ks.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+ks.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+
+
+```{r}
+t.test(sig, null_rand_cell, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_permut, alternative = "less")
+```
+
+```{r}
+t.test(sig, null_shuf_count, alternative = "less")
+
+```
+
+```{r}
+knitr::knit_exit()
+```

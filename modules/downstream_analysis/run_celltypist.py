@@ -13,23 +13,20 @@ parser = argparse.ArgumentParser()
 parser.add_argument("sample_type", type=str)
 parser.add_argument("cells_or_nuclei", type=str)
 parser.add_argument("quant_dir", help="alevin-fry quant dir", type=str)
-parser.add_argument("output_dir", help="output dir", type=str)
+parser.add_argument("out_dir", help="output dir", type=str)
 args = parser.parse_args()
 # args = parser.parse_args(["human_pbmc", "cell", ".", "."])
 
 # if the output directory exists, we delete it
-if os.path.exists(args.out_dir):
-    shutil.rmtree(args.out_dir)
-
-# make a new one    
-os.mkdir(args.out_dir)
+if not os.path.exists(args.out_dir):
+    os.mkdir(args.out_dir)
 
 output_format = 'snrna'
 if args.cells_or_nuclei == "cell":
     output_format = "scrna"
 
 # we read in the id to name mapping tsv file (no header), and convert it to a dict
-gid2name = {id: n for (id, n) in pd.read_csv("gene_id_to_name.tsv", sep="\t",header=None).values}
+gid2name = {id: n for (id, n) in pd.read_csv(os.path.join(args.quant_dir,"gene_id_to_name.tsv"), sep="\t",header=None).values}
 
 adata = pyroe.load_fry(args.quant_dir, output_format=output_format)
 

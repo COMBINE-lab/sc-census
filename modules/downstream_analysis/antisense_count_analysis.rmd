@@ -1,0 +1,1901 @@
+---
+title: "Antisense Gene Expression Count Matrices Analysis"
+author: "Dongze He, Steve M. Mount, and Rob Patro"
+date: "`r Sys.Date()`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        number_sections: true
+        code_folding: hide
+        fig_caption: true
+        self_contained: true
+
+params:
+    utils_path: null
+    sctype_csv: null
+    fw_quant_dir: null
+    rc_quant_dir: null
+    out_dir: null
+    sample_type: null
+    num_threads: 1
+    num_pcs: 50
+    logfc.threshold: 0.25
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load_library}
+
+if (!require("findPC")) {
+    devtools::install_github("haotian-zhuang/findPC")
+}
+
+suppressPackageStartupMessages({
+    library(fishpond)
+    library(Seurat)
+    library(doParallel)
+    library(SingleCellExperiment)
+    library(pheatmap)
+    library(RColorBrewer)
+    library(ggpubr)
+    library(ggplot2)
+    library(igraph)
+    library(openxlsx)
+    library(HGNChelper)
+    library(ggVennDiagram)
+    library(UpSetR)
+    library(grid)
+})
+
+# params = list(
+#     utils_path = "/nfshomes/zaza/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+#     sctype_csv = "sctype_predictions.csv",
+#     fw_quant_dir = "fw",
+#     rc_quant_dir = "rc",
+#     out_dir = "antisense_count_analysis",
+#     sample_type = "human_pbmc",
+#     num_threads = 32,
+#     num_pcs = 50,
+#     logfc.threshold = 0.25
+# )
+
+metrics = c("ari", "fmi", "nmi")
+
+source(params$utils_path)
+
+if (params$num_threads < 2) {
+    registerDoSEQ()
+} else {
+    registerDoParallel(cores = params$num_threads)
+}
+
+```
+## Introduction
+
+In scRNA-seq, antisense reads are an non-trivial read group but have been ignored all the time. In this analysis, we will explore the count matrix generated using only antisense reads in the scRNA-seq data and see if they can be used to assist downstream analyses. Notice that when building the antisense count matrix, we only count the UMIs that do not have any sense reads. This is because we want to separate the signals in sense and antisense reads.
+
+Antisense reads can be explained from both biological and technical perspectives. From the biological perspective, antisense reads can be generated from antisense transcripts and other regulatory RNAs. From the technical perspective, antisense reads can be generated from cDNA priming. 10X released a [technical note](https://cdn.10xgenomics.com/image/upload/v1660261286/support-documents/CG000376_TechNote_Antisense_Intronic_Reads_SingleCellGeneExpression_RevA.pdf) for explaining antisense reads from technical perspective. In this analysis, we will explore the antisense reads from both perspectives.
+
+We assume that, if the antisense reads are technical noise, then the antisense reads will have no preference for genes. Therefore, highly expressed genes will have more antisense reads than lowly expressed genes because they have more transcripts to generate noise. Therefore, we will see a high correlation between sense and antisense counts. However, if the antisense reads are not only technical noise, then they can contain signals from antisense transcripts and other regulatory elements. In this case, we will not see a high correlation between sense and antisense counts. 
+
+At the end of the analysis, we want to draw two conclusions:
+1. If the antisense reads are technical noise, then we will see a high correlation between sense and antisense counts. In this case, genes with only antisense count and zero sense count are very likely to be caused by the low capture rate (sensitivity) of single-cell assasys. Therefore, we can use the antisense count matrix to help us identify the undetected genes in the sense count matrix.
+2. If the antisense reads are not only technical noise, then they can contain signals from antisense transcripts and other regulatory elements. In this case, we will not see a high correlation between sense and antisense counts. In this case, we can use the antisense count matrix to help us identify the antisense transcripts and other regulatory elements.
+
+## Preprocessing
+we first create the output directories 
+```{r define_out_dirs}
+hist_dir <- file.path(params$out_dir, "similarity_score_histograms")
+dir.create(hist_dir,  recursive = TRUE, showWarnings = FALSE)
+
+heatmap_dir <- file.path(params$out_dir, "similarity_score_heatmaps")
+deg_dir <- file.path(params$out_dir,"DEG_results")
+dim_reduc_dir <- file.path(params$out_dir, "dim_reduction_plots")
+umap_dir <- file.path(dim_reduc_dir, "umap_plots")
+tsne_dir <- file.path(dim_reduc_dir, "tsne_plots")
+dir.create(heatmap_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(dim_reduc_dir,  recursive = TRUE, showWarnings = FALSE)
+dir.create(umap_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tsne_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(deg_dir,  recursive = TRUE, showWarnings = FALSE)
+```
+
+
+## Load data
+We then read the sctype cell type assignment result and sense and antisense count matrices. This analysis is mainly about comparing the undetected genes (zeros in the matrices) in sense and antisense count matrices.
+
+we load the cell type assignment result from sctype
+
+```{r load_sctype}
+sctype_df <- read.csv(params$sctype_csv, stringsAsFactors = FALSE)
+head(sctype_df)
+```
+
+we load sense and antisense quant results
+```{r load_data_sense}
+sense_sce = loadFry(params$fw_quant_dir, outputFormat = "raw")
+sense_sce = sense_sce[,(colSums(sense_sce@assays@data$spliced) > 3 & colSums(sense_sce@assays@data$unspliced) > 3 & colSums(sense_sce@assays@data$ambiguous) > 3)]
+
+sense_sce = sense_sce[,colnames(sense_sce) %in% sctype_df$barcode]
+
+gid2name_df <- read.csv(file.path(params$rc_quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
+
+# we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
+rownames(sense_sce) <- make.unique(gid2name_df[match(rownames(sense_sce), gid2name_df[,1]),2])
+
+sense_sce
+```
+
+```{r load_data_antisense}
+antisense_sce = loadFry(params$rc_quant_dir, outputFormat = "raw")
+antisense_sce = antisense_sce[,(colSums(antisense_sce@assays@data$spliced) > 3 & colSums(antisense_sce@assays@data$unspliced) > 3 & colSums(antisense_sce@assays@data$ambiguous) > 3)]
+
+gid2name_df <- read.csv(file.path(params$rc_quant_dir, "gene_id_to_name.tsv"), stringsAsFactors = FALSE, header = FALSE, sep = "\t")
+# we match the rowname of sce using the first column in gid2name_df and assign the second column as the new rowname
+rownames(antisense_sce) <- make.unique(gid2name_df[match(rownames(antisense_sce), gid2name_df[,1]),2])
+
+intersect_cells = intersect(colnames(sense_sce), colnames(antisense_sce))
+intersect_genes = intersect(rownames(sense_sce), rownames(antisense_sce))
+sense_sce = sense_sce[intersect_genes,intersect_cells]
+antisense_sce = antisense_sce[intersect_genes,intersect_cells]
+
+antisense_sce
+```
+
+Then, we get the count matrices for each of the three count types
+
+```{r get_matrices}
+sense_s = assay(sense_sce, "spliced", withDimnames=TRUE) 
+sense_u = assay(sense_sce, "unspliced", withDimnames=TRUE) 
+sense_a = assay(sense_sce, "ambiguous", withDimnames=TRUE) 
+
+antisense_s = assay(antisense_sce, "spliced", withDimnames=TRUE)
+antisense_u = assay(antisense_sce, "unspliced", withDimnames=TRUE)
+antisense_a = assay(antisense_sce, "ambiguous", withDimnames=TRUE)
+
+sense_usa = sense_s + sense_u + sense_a
+antisense_usa = antisense_s + antisense_u + antisense_a
+
+```
+
+## Primary analysis
+### Total count of the count matrices
+Before anything, let's just have a quick view on the total count of the count matrices
+```{r total_count}
+cts = c(sum(sense_s), sum(sense_u), sum(sense_a), sum(antisense_s), sum(antisense_u), sum(antisense_a))
+count_table = as.data.frame(matrix(cts, ncol = 2), row.names = c("Spliced", "Unspliced", "Ambiguous"))
+count_table["Total",] = c(colSums(count_table))
+colnames(count_table) = c("Sense", "Antisense")
+count_table[,"Total"] = c(rowSums(count_table))
+
+count_table_percent = count_table
+count_table_percent$Sense = paste0(round(count_table$Sense/count_table$Total * 100,2), "%")
+count_table_percent$Antisense = paste0(round(count_table$Antisense/count_table$Total * 100,2), "%")
+
+count_table_percent
+```
+
+From the table we can see that:
+1. Antisense UMIs are not rare. It is comparable with sense reads.
+2. The proportiona of UMIs in unspliced and ambigous splice status follow the same pattern in sense and antisense count matrices. Interestingly, we saw much less spliced UMIs than other two splice status when comparing across sense and antisense UMIs.
+
+### Co-occurence of sense and antisense UMIs
+Then, we want to know if sense and antisense UMIs always appear together.
+
+```{r co_occurence}
+cooc_cts = c(
+    # sense only
+    sum((sense_s > 0) & (antisense_s == 0)), 
+    sum((sense_u > 0) & (antisense_u == 0)), 
+    sum((sense_a > 0) & (antisense_a == 0)), 
+    sum((sense_usa > 0) & (antisense_usa == 0)), 
+    # antisense only
+    sum((sense_s == 0) & (antisense_s > 0)), 
+    sum((sense_u == 0) & (antisense_u > 0)), 
+    sum((sense_a == 0) & (antisense_a > 0)), 
+    sum((sense_usa > 0) & (antisense_usa > 0)), 
+    # both
+    sum((sense_s > 0) & (antisense_s > 0)), 
+    sum((sense_u > 0) & (antisense_u > 0)), 
+    sum((sense_a > 0) & (antisense_a > 0)),
+    sum((sense_usa > 0) & (antisense_usa > 0))
+    )
+# cooc_cts = c(sum(cooc_s == 0), sum(cooc_u == 0), sum(cooc_a == 0), sum(cooc_s == 1), sum(cooc_u == 1), sum(cooc_a == 1), sum(cooc_s == 2), sum(cooc_u == 2), sum(cooc_a == 2))
+cooc_table = as.data.frame(matrix(cooc_cts, ncol = 3), row.names = c("Spliced", "Unspliced", "Ambiguous", "All"))
+cooc_table["Total",] = c(colSums(cooc_table))
+colnames(cooc_table) = c("sense_only", "antisense_only", "Both")
+cooc_table[,"Total"] = c(rowSums(cooc_table))
+
+cooc_table_percent = cooc_table
+cooc_table_percent$sense_only = paste0(round(cooc_table$sense_only/cooc_table$Total * 100,2), "%")
+cooc_table_percent$antisense_only = paste0(round(cooc_table$antisense_only/cooc_table$Total * 100,2), "%")
+cooc_table_percent$Both = paste0(round(cooc_table$Both/cooc_table$Total * 100,2), "%")
+cooc_table_percent
+
+```
+
+
+So, how many new genes can we detect from inclduing antisense counts?
+```{r newly detected genes}
+detected_genes = c(
+    # sense
+    median(rowSums(sense_s)),
+    median(rowSums(sense_u)),
+    median(rowSums(sense_a)),
+    median(rowSums(sense_usa)),
+    # antisense
+    median(rowSums(antisense_s)),
+    median(rowSums(antisense_u)),
+    median(rowSums(antisense_a)),
+    median(rowSums(antisense_usa)),
+    # both
+    median(rowSums(sense_s) + rowSums(antisense_s)),
+    median(rowSums(sense_u) + rowSums(antisense_u)),
+    median(rowSums(sense_a) + rowSums(antisense_a)),
+    median(rowSums(sense_usa) + rowSums(antisense_usa)),
+    # new gene
+    median(rowSums(sense_s) == 0 & rowSums(antisense_s) > 0),
+    median(rowSums(sense_u) == 0 & rowSums(antisense_u) > 0),
+    median(rowSums(sense_a) == 0 & rowSums(antisense_a) > 0),
+    median(rowSums(sense_usa) == 0 & rowSums(antisense_usa) > 0)
+)
+detected_genes_table = as.data.frame(matrix(detected_genes, ncol = 4), row.names = c("Spliced", "Unspliced", "Ambiguous", "All"))
+colnames(detected_genes_table) = c("Sense", "Antisense", "Both", "Newly Detected")
+
+detected_genes_table_percent = detected_genes_table
+detected_genes_table_percent$Sense = paste0(round(detected_genes_table$Sense/nrow(sense_s) * 100,2), "%")
+detected_genes_table_percent$Antisense = paste0(round(detected_genes_table$Antisense/nrow(antisense_s) * 100,2), "%")
+detected_genes_table_percent$Both = paste0(round(detected_genes_table$Both/nrow(sense_s) * 100,2), "%")
+detected_genes_table_percent$`Newly Detected` = paste0(round(detected_genes_table$`Newly Detected`/nrow(sense_s) * 100,2), "%")
+detected_genes_table_percent
+```
+
+
+As we can see, sense and antisense UMIs do not always appear together. In fact, they are more likely to appear alone than together. This will be a good new for us because it indicates that the antisense UMIs consist of both technical and biological products. we can use the antisense count matrix to help identify the undetected genes in the sense count matrix, and at the same time to identify the antisense transcripts and other regulatory elements. 
+
+## Correlation between sense and antisense counts
+### pearson correlation between sense and antisense counts
+
+If the antisense reads are technical noise like cDNA priming, we will see a high correlation between sense and antisense counts. The reason is that technicial noise will have no preference for genes. Therefore, highly expressed genes will have more antisense reads than lowly expressed genes because they have more transcripts to generate noise.
+
+If we do not see this correlation, then the antisense reads are not only technical noise. They can contain signals from antisense transcripts and other regulatory elements.
+
+we compute the correlation between the sense and antisense count of each cell. 
+### Compute the correlation between sense and antisense counts of all cells for genes with sense counts
+```{r}
+shuf_genes_hist_dir = file.path(hist_dir, "sense_genes")
+dir.create(shuf_genes_hist_dir,  recursive = TRUE, showWarnings = FALSE)
+```
+
+
+Before everything, we want to show that shuffled (random) counts will lead to a cosine similart of zero.
+```{r batch_cell_correlation_spliced}
+batch_size=ceiling(ncol(sense_s)/params$num_threads)
+
+sense_s_shuf = sense_s[
+        sample(nrow(sense_s)), 
+        sample(ncol(sense_s))
+    ]
+antisense_s_shuf = antisense_s[
+        sample(nrow(antisense_s)), 
+        sample(ncol(antisense_s))
+    ]
+
+spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s_shuf),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_s_shuf = sense_s_shuf[,batch_id:min(batch_id+batch_size-1, ncol(sense_s_shuf))]
+    batch_antisense_s_shuf = antisense_s_shuf[,batch_id:min(batch_id+batch_size-1, ncol(antisense_s_shuf))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_s_shuf)) {
+        s_vec_u = batch_sense_s_shuf[,cid]
+        a_vec_u = batch_antisense_s_shuf[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_s
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_s_shuf)
+    spliced_cor_df
+}
+
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation.pdf"), width = 10, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+
+Let's start with spliced count matrices
+```{r batch_cell_correlation_spliced}
+batch_size=ceiling(ncol(sense_s)/params$num_threads)
+
+spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_s = sense_s[,batch_id:min(batch_id+batch_size-1, ncol(sense_s))]
+    batch_antisense_s = antisense_s[,batch_id:min(batch_id+batch_size-1, ncol(antisense_s))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_s)) {
+        s_vec_u = batch_sense_s[,cid]
+        a_vec_u = batch_antisense_s[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_s
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_s)
+    spliced_cor_df
+}
+
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation.pdf"), width = 10, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Although the correlation between sense and antisense spliced counts is not very high, it is still higher than what we expected.
+
+Then let's do the same thing for unspliced count matrices
+
+```{r batch_cell_correlation_unspliced}
+batch_size=ceiling(ncol(sense_u)/params$num_threads)
+
+unspliced_cor_df = foreach (batch_id=seq(1,ncol(sense_u),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_u = sense_u[,batch_id:min(batch_id+batch_size-1, ncol(sense_u))]
+    batch_antisense_u = antisense_u[,batch_id:min(batch_id+batch_size-1, ncol(antisense_u))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_u)) {
+        s_vec_u = batch_sense_u[,cid]
+        a_vec_u = batch_antisense_u[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_s
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_u)
+    spliced_cor_df
+}
+
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(unspliced_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(unspliced_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Let's do the same thing for ambiguous count matrices
+
+```{r batch_cell_correlation_ambiguous}
+batch_size=ceiling(ncol(sense_a)/params$num_threads)
+
+ambiguous_cor_df = foreach (batch_id=seq(1,ncol(sense_a),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_a = sense_a[,batch_id:min(batch_id+batch_size-1, ncol(sense_a))]
+    batch_antisense_a = antisense_a[,batch_id:min(batch_id+batch_size-1, ncol(antisense_a))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_a)) {
+        s_vec_u = batch_sense_a[,cid]
+        a_vec_u = batch_antisense_a[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_s
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_a)
+    spliced_cor_df
+}
+
+
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Finally, let's do it for the USA count matrix 
+
+```{r batch_cell_correlation_usa}
+batch_size=ceiling(ncol(sense_usa)/params$num_threads)
+
+usa_cor_df = foreach (batch_id=seq(1,ncol(sense_usa),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_usa = sense_usa[,batch_id:min(batch_id+batch_size-1, ncol(sense_usa))]
+    batch_antisense_usa = antisense_usa[,batch_id:min(batch_id+batch_size-1, ncol(antisense_usa))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_usa)) {
+        s_vec_u = batch_sense_usa[,cid]
+        a_vec_u = batch_antisense_usa[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_s
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_usa)
+    spliced_cor_df
+}
+
+
+pdf(file.path(sense_genes_hist_dir, "usa_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(sense_genes_hist_dir, "usa_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "usa_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(usa_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(sense_genes_hist_dir, "usa_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(usa_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+
+### Compute the correlation between sense and antisense counts of all cells for genes with antisense counts
+```{r}
+antisense_genes_hist_dir = file.path(hist_dir, "antisense_genes")
+dir.create(antisense_genes_hist_dir,  recursive = TRUE, showWarnings = FALSE)
+```
+
+Let's start with spliced count matrices
+```{r batch_cell_correlation_spliced_antisense}
+batch_size=ceiling(ncol(sense_s)/params$num_threads)
+
+spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_s = sense_s[,batch_id:min(batch_id+batch_size-1, ncol(sense_s))]
+    batch_antisense_s = antisense_s[,batch_id:min(batch_id+batch_size-1, ncol(antisense_s))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_s)) {
+        s_vec_u = batch_sense_s[,cid]
+        a_vec_u = batch_antisense_s[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_s)
+    spliced_cor_df
+}
+
+
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation.pdf"), width = 10, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Although the correlation between sense and antisense spliced counts is not very high, it is still higher than what we expected.
+
+Then let's do the same thing for unspliced count matrices
+
+```{r batch_cell_correlation_unspliced_antisense}
+batch_size=ceiling(ncol(sense_u)/params$num_threads)
+
+unspliced_cor_df = foreach (batch_id=seq(1,ncol(sense_u),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_u = sense_u[,batch_id:min(batch_id+batch_size-1, ncol(sense_u))]
+    batch_antisense_u = antisense_u[,batch_id:min(batch_id+batch_size-1, ncol(antisense_u))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_u)) {
+        s_vec_u = batch_sense_u[,cid]
+        a_vec_u = batch_antisense_u[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_u)
+    spliced_cor_df
+}
+
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(unspliced_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(unspliced_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Let's do the same thing for ambiguous count matrices
+
+```{r batch_cell_correlation_ambiguous_antisense}
+batch_size=ceiling(ncol(sense_a)/params$num_threads)
+
+ambiguous_cor_df = foreach (batch_id=seq(1,ncol(sense_a),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_a = sense_a[,batch_id:min(batch_id+batch_size-1, ncol(sense_a))]
+    batch_antisense_a = antisense_a[,batch_id:min(batch_id+batch_size-1, ncol(antisense_a))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_a)) {
+        s_vec_u = batch_sense_a[,cid]
+        a_vec_u = batch_antisense_a[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_a)
+    spliced_cor_df
+}
+
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Finally, let's do it for the USA count matrix 
+
+```{r batch_cell_correlation_usa_antisense}
+batch_size=ceiling(ncol(sense_usa)/params$num_threads)
+
+usa_cor_df = foreach (batch_id=seq(1,ncol(sense_usa),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_usa = sense_usa[,batch_id:min(batch_id+batch_size-1, ncol(sense_usa))]
+    batch_antisense_usa = antisense_usa[,batch_id:min(batch_id+batch_size-1, ncol(antisense_usa))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_usa)) {
+        s_vec_u = batch_sense_usa[,cid]
+        a_vec_u = batch_antisense_usa[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        # nonzero = nonzero_s & nonzero_a
+        nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_usa)
+    spliced_cor_df
+}
+
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(usa_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(usa_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+### Compute the correlation between sense and antisense counts of all cells for genes with sense and antisense counts
+```{r}
+sense_antisense_genes_hist_dir = file.path(hist_dir, "sense_and_antisense_genes")
+dir.create(sense_antisense_genes_hist_dir,  recursive = TRUE, showWarnings = FALSE)
+```
+
+Let's start with spliced count matrices
+```{r batch_cell_correlation_spliced_sense_antisense}
+batch_size=ceiling(ncol(sense_s)/params$num_threads)
+
+spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_s = sense_s[,batch_id:min(batch_id+batch_size-1, ncol(sense_s))]
+    batch_antisense_s = antisense_s[,batch_id:min(batch_id+batch_size-1, ncol(antisense_s))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_s)) {
+        s_vec_u = batch_sense_s[,cid]
+        a_vec_u = batch_antisense_s[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        nonzero = nonzero_s & nonzero_a
+        # nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_s)
+    spliced_cor_df
+}
+
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation.pdf"), width = 10, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(spliced_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(spliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(spliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+    ggplot(spliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Although the correlation between sense and antisense spliced counts is not very high, it is still higher than what we expected.
+
+Then let's do the same thing for unspliced count matrices
+
+```{r batch_cell_correlation_unspliced_sense_antisense}
+batch_size=ceiling(ncol(sense_u)/params$num_threads)
+
+unspliced_cor_df = foreach (batch_id=seq(1,ncol(sense_u),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_u = sense_u[,batch_id:min(batch_id+batch_size-1, ncol(sense_u))]
+    batch_antisense_u = antisense_u[,batch_id:min(batch_id+batch_size-1, ncol(antisense_u))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_u)) {
+        s_vec_u = batch_sense_u[,cid]
+        a_vec_u = batch_antisense_u[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        nonzero = nonzero_s & nonzero_a
+        # nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_u)
+    spliced_cor_df
+}
+
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(unspliced_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(unspliced_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(unspliced_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(unspliced_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Let's do the same thing for ambiguous count matrices
+
+```{r batch_cell_correlation_ambiguous_sense_antisense}
+batch_size=ceiling(ncol(sense_a)/params$num_threads)
+
+ambiguous_cor_df = foreach (batch_id=seq(1,ncol(sense_a),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_a = sense_a[,batch_id:min(batch_id+batch_size-1, ncol(sense_a))]
+    batch_antisense_a = antisense_a[,batch_id:min(batch_id+batch_size-1, ncol(antisense_a))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_a)) {
+        s_vec_u = batch_sense_a[,cid]
+        a_vec_u = batch_antisense_a[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        nonzero = nonzero_s & nonzero_a
+        # nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_a)
+    spliced_cor_df
+}
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(ambiguous_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(ambiguous_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+Finally, let's do it for the USA count matrix 
+
+```{r batch_cell_correlation_usa_sense_antisense}
+batch_size=ceiling(ncol(sense_usa)/params$num_threads)
+
+usa_cor_df = foreach (batch_id=seq(1,ncol(sense_usa),by=batch_size), .inorder=FALSE, .combine = rbind) %dopar% {
+    batch_sense_usa = sense_usa[,batch_id:min(batch_id+batch_size-1, ncol(sense_usa))]
+    batch_antisense_usa = antisense_usa[,batch_id:min(batch_id+batch_size-1, ncol(antisense_usa))]
+    
+    spliced_cor_df = as.data.frame(matrix(0, ncol =5, nrow = 0))
+    colnames(spliced_cor_df) = c("n_sense", "n_antisense", "pearson", "spearman", "cosine")
+    
+    for(cid in 1:ncol(batch_antisense_usa)) {
+        s_vec_u = batch_sense_usa[,cid]
+        a_vec_u = batch_antisense_usa[,cid]
+
+        nonzero_s = (s_vec_u > 0)
+        nonzero_a = (a_vec_u > 0)
+        nonzero = nonzero_s & nonzero_a
+        # nonzero = nonzero_a
+
+        s_vec_u = s_vec_u[nonzero]
+        a_vec_u = a_vec_u[nonzero]
+        
+        spliced_cor_df[cid,] = c(sum(nonzero_s), sum(nonzero_a), cor(s_vec_u, a_vec_u,  method = "pearson"), cor(s_vec_u, a_vec_u,  method = "spearman"), cos.sim(s_vec_u, a_vec_u))  
+    }
+    rownames(spliced_cor_df) = colnames(batch_antisense_usa)
+    spliced_cor_df
+}
+
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation.pdf"), width = 20, height = 10)
+
+print(ggarrange(plotlist = list(
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+))
+dev.off()
+
+
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_spearman.pdf"), width = 20, height = 10)
+
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_pearson.pdf"), width = 20, height = 10)
+
+ggplot(usa_cor_df, aes(x=pearson)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_cosine.pdf"), width = 20, height = 10)
+
+ggplot(usa_cor_df, aes(x=cosine)) + 
+    geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+    geom_density(alpha=.2, fill="#FF6666")
+
+dev.off()
+
+ggarrange(plotlist = list(
+    ggplot(usa_cor_df, aes(x=spearman)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=pearson)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666"),
+        
+    ggplot(usa_cor_df, aes(x=cosine)) + 
+        geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
+        geom_density(alpha=.2, fill="#FF6666")
+    ),
+    labels = LETTERS[1:3]
+)
+```
+
+
+From the above plot, we can see that the similarity of sense and antisense counts is pretty decent. This indicates that at least part of those UMIs are derived from technical imperfection. As we discussed above, this menas that these antisense UMIs can be used to impute the undetected genes in the sense count matrix.
+
+## Clustering analysis
+
+In this analysis, we will impute the sense count matrix and then use that to cluster the cells. We will then compare the results with the clustering results using the standard count matrix.
+
+### Impute the sense count matrix
+To reduce the effect of technical noise, we will impute the sense count matrix using the antisense count matrix only if the sense count is zero. Here we will work on the total count matrix, which is the sum of spliced, unspliced and ambiguous count matrices.
+
+```{r impute_sense_count}
+
+total_sense_imputed = sense_usa
+
+total_sense_imputed[sense_usa == 0 & antisense_usa != 0] = 1
+
+```
+
+Then, we apply the standard Seurat pipeline to find the clusters in the imputed count matrix
+
+
+```{r create_seurat_objects}
+
+seurat_obj_list <- list(
+    total_sense = list(
+        count_type = "total_sense",
+        seurat_obj = create_seurat_obj(
+            m = sense_usa,
+            sce = sense_sce,
+            project = "total_sense"
+        )
+    ),
+    total_sense_imputed = list(
+        count_type = "total_sense_imputed",
+        seurat_obj = create_seurat_obj(
+            m = total_sense_imputed,
+            sce = antisense_sce,
+            project = "total_sense_imputed"
+        )
+    ),
+
+    total_both = list(
+        count_type = "total_both",
+        seurat_obj = create_seurat_obj(
+            m = sense_usa + antisense_usa,
+            sce = antisense_sce,
+            project = "total_both"
+        )
+    ),
+    total_antisense = list(
+        count_type = "total_antisense",
+        seurat_obj = create_seurat_obj(
+            m = antisense_usa,
+            sce = antisense_sce,
+            project = "total_sense"
+        )
+    )
+)
+
+```
+
+```{r find_clusters}
+
+n_sctype_clusters = length(unique(sctype_df$cell_type))
+
+n_clusters_vec = rep(
+    c(
+        max(floor(n_sctype_clusters* 0.2),3), 
+        max(floor(n_sctype_clusters*0.6),7),
+        max(n_sctype_clusters, 11)
+    ),
+    length(seurat_obj_list)
+)
+
+name_list = rep(names(seurat_obj_list), each = 3)
+
+interm_clusters_result_list = foreach (it_id = seq(1, length(name_list)) , .combine = "c") %dopar% {
+    n_clusters = n_clusters_vec[it_id]
+    count_type = name_list[it_id]
+    seurat_obj = seurat_obj_list[[count_type]]$seurat_obj
+    print(paste0("Finding clusters for ", count_type, " count matrix with ", n_clusters, " clusters"))        
+
+    result_list = list()
+    result_list[[count_type]]$name <- count_type
+    result_list[[count_type]]$clusters_result <- seurat_clusters(
+        seurat_obj = seurat_obj,
+        n_clusters = n_clusters,
+        # step_size = 0.4,
+        verbose = FALSE
+    )
+            
+    out_list = list()
+    out_list[[as.character(n_clusters)]] = result_list
+    out_list
+}
+
+all_clusters_result_list = list()
+
+for (n_clusters in unique(names(interm_clusters_result_list))) {
+    clusters_result_list = lapply(interm_clusters_result_list[which(names(interm_clusters_result_list) == n_clusters)], function(x) x[[1]])
+    names(clusters_result_list) = sapply(clusters_result_list, function(x) x$name)
+
+    heatmap_list <- make_heatmaps(
+        clusters_result_list = clusters_result_list,
+        main = paste0("(", n_clusters, " clusters)"),
+        dataset_id = "my_data",
+        metrics = metrics,
+        fontsize = 15
+    )
+
+    dir.create(file.path(heatmap_dir, paste0(n_clusters,"_clusters")), recursive = TRUE, showWarnings = FALSE)
+    for (metric in paste0(metrics, "_heatmap")) {
+        pdf(file.path(heatmap_dir, 
+                        paste0(n_clusters,"_clusters"), 
+                        paste0(metric,".pdf")
+                    )
+            #         ,
+            # width = 10,
+            # height = 10
+        )
+        # Draw the heatmap
+        grid::grid.draw(rectGrob(gp=gpar(fill="white", lwd=0)))
+        grid::grid.draw(heatmap_list[[metric]])
+        dev.off()
+    }
+
+    all_clusters_result_list[[as.character(n_clusters)]] = list(
+        n_clusters = n_clusters,
+        clusters_result_list = clusters_result_list,
+        heatmap_list = heatmap_list
+    )
+}
+
+
+```
+
+This shows that even when we aim for 20 clusters, the imputed sense matrix and sense matrix, as well as the total sense and antisense matrix, they are all very similar. This means that including the antisense count matrix does not significantly change the clustering results, while drastically improved the gene discovery rate.
+
+## Next, just for visualization purpose, we plot the tSNE/UMAP plot for each count matrix using sctype clusters
+
+```{r plot_dim_reduction}
+
+# cell_to_cluster_map = sctype_df[,c("cell_type")]
+# names(cell_to_cluster_map) <- sctype_df[,c("barcodes")]
+
+for (cid in names(all_clusters_result_list)) {
+    dir.create(file.path(umap_dir, cid), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(tsne_dir, cid), recursive = TRUE, showWarnings = FALSE)
+    
+    cell_to_cluster_map = Idents(all_clusters_result_list[[cid]]$clusters_result_list[["total_sense"]]$clusters_result$seurat_obj)
+    
+    foreach (clusters_result_set=all_clusters_result_list[[cid]]$clusters_result_list, .combine = "c") %dopar% {
+        seurat_obj <- clusters_result_set$clusters_result$seurat_obj
+        count_type <- clusters_result_set$name
+        seurat_obj <- AddMetaData(
+            object = seurat_obj,
+            metadata = cell_to_cluster_map[colnames(seurat_obj)],
+            col.name = "standard_clusters"
+        )
+        seurat_obj <- RunUMAP(
+            object = seurat_obj,
+            dims = 1:clusters_result_set$clusters_result$npcs,
+            verbose = FALSE
+        )
+        seurat_obj <- RunTSNE(
+            object = seurat_obj,
+            dims = 1:clusters_result_set$clusters_result$npcs,
+            verbose = FALSE,
+        check_duplicates = FALSE
+        )
+        
+        Idents(seurat_obj) <- "seurat_clusters"
+        su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by seurat clusters found using ", count_type, " counts"))
+        st = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by seurat clusters found using ", count_type, " counts"))
+
+        Idents(seurat_obj) <- "standard_clusters"
+        cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by standard counts"))
+        ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by standard counts"))
+
+        # plot tSNE
+        pdf(file.path(tsne_dir,cid,paste0(count_type,"_tSNE.pdf")),width = 12,height = 6)
+        print(ggarrange(plotlist = list(st,ct)))
+        dev.off()
+
+        # plot UMAP
+        pdf(file.path(umap_dir,cid,paste0(count_type,"_UMAP.pdf")),width = 12,height = 6)
+        print(ggarrange(plotlist = list(su,cu)))
+        dev.off()
+        # clusters_result_set$clusters_result$seurat_obj <- seurat_obj
+
+        # clusters_result_set$heatmap_list = list(
+        #     tsne_seurat_clusters = st, 
+        #     tsne_sctype_clusters = ct, 
+        #     umap_seurat_clusters = su, 
+        #     umap_sctype_clusters = cu
+        # )
+        # out_list = list()
+        # out_list[[count_type]] = clusters_result_set
+        # out_list
+    }
+}
+
+```
+
+```{r plot_dim_reduction_heatmap_celltypes}
+
+# Then we do the same thing for the cell types
+
+dir.create(file.path(umap_dir, "sctype"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(tsne_dir, "sctype"), recursive = TRUE, showWarnings = FALSE)
+
+foreach (clusters_result_set=all_clusters_result_list[[cid]]$clusters_result_list, .combine = "c") %dopar% {
+    seurat_obj <- clusters_result_set$clusters_result$seurat_obj
+    seurat_obj <- seurat_obj[,sctype_df$barcode]
+    count_type <- clusters_result_set$name
+    seurat_obj <- AddMetaData(
+        object = seurat_obj,
+        metadata = sctype_df$cell_type,
+        col.name = "standard_clusters"
+    )
+    seurat_obj <- RunUMAP(
+        object = seurat_obj,
+        dims = 1:clusters_result_set$clusters_result$npcs,
+        verbose = FALSE
+    )
+    seurat_obj <- RunTSNE(
+        object = seurat_obj,
+        dims = 1:clusters_result_set$clusters_result$npcs,
+        verbose = FALSE,
+        check_duplicates = FALSE
+    )
+    
+    Idents(seurat_obj) <- "seurat_clusters"
+    su = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by seurat clusters found using ", count_type, " counts"))
+    st = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by seurat clusters found using ", count_type, " counts"))
+
+    Idents(seurat_obj) <- "standard_clusters"
+    cu = DimPlot(seurat_obj, reduction = "umap") + patchwork::plot_annotation(title = paste0("UMAP plot colored by cell types"))
+    ct = DimPlot(seurat_obj, reduction = "tsne") + patchwork::plot_annotation(title = paste0("tSNE plot colored by cell types"))
+
+    # plot tSNE
+    pdf(file.path(tsne_dir,"sctype",paste0(count_type,"_tSNE.pdf")),width = 12,height = 6)
+    print(ggarrange(plotlist = list(st,ct)))
+    dev.off()
+
+    # plot UMAP
+    pdf(file.path(umap_dir,"sctype",paste0(count_type,"_UMAP.pdf")),width = 12,height = 6)
+    print(ggarrange(plotlist = list(su,cu)))
+    dev.off()
+    # clusters_result_set$clusters_result$seurat_obj <- seurat_obj
+
+    # clusters_result_set$heatmap_list = list(
+    #     tsne_seurat_clusters = st, 
+    #     tsne_sctype_clusters = ct, 
+    #     umap_seurat_clusters = su, 
+    #     umap_sctype_clusters = cu
+    # )
+    # out_list = list()
+    # out_list[[count_type]] = clusters_result_set
+    # out_list
+}
+
+```
+
+
+From the results we can see that the overall shape and the cluster boundaries are very similar. However, when we look at the details, we can see that the imputed sense count matrix and total sense and antisense count matrix resulted in a finer clustering. This might indicate the improvement of the resolution of the clustering. 
+
+## DEG analysis
+
+In this section, we find the marker genes for each cluster/cell type in each count matrix, and compare the DEGs discovered for each cell type across count matrices.
+
+To make the DEGs from different count matrices comparable, we will use the same clustering results for all count matrices. We will use the clustering results from sctype.
+
+```{r create_DEG_list}
+
+# we find markers using each of the count types for each of the identification sets
+cell_to_cluster_map = sctype_df[,c("cell_type")]
+names(cell_to_cluster_map) <- sctype_df[,c("barcode")]
+
+verbose = TRUE
+marker_df_list <-
+    foreach(clusters_result_set = all_clusters_result_list[[as.character(n_sctype_clusters)]]$clusters_result_list, .combine=c) %dopar% {
+        if (verbose)
+            message(paste0("  - Finding markers for ", clusters_result_set$name))
+        
+        seurat_obj <-
+            clusters_result_set$clusters_result$seurat_obj
+        Idents(seurat_obj) <- cell_to_cluster_map[colnames(seurat_obj)]
+        
+        # we find markers for each of the identification set
+        all_markers_df <- FindAllMarkers(
+            object = seurat_obj,
+            verbose = FALSE
+        )
+        
+        out_list = list()
+        out_list[[clusters_result_set$name]] = list(
+            name = clusters_result_set$name,
+            all_markers_df = all_markers_df
+        )
+        out_list
+    }
+
+# reorganize the list
+# we want the DEGs of each cell type to be in the same list, split by count type
+cell_type_count_type_marker_list <- list()
+# iterate over count types
+for (marker_df_set in marker_df_list) {
+    # iterate over cell types
+    for (cell_type in levels(marker_df_set$all_markers_df$cluster)) {
+        deg_df <- marker_df_set$all_markers_df[marker_df_set$all_markers_df$cluster == cell_type,]
+                            
+        # filter if needed
+        deg_df = filter_deg_df(
+            deg_df,
+            assay_name = marker_df_set$name,
+            only_positive = FALSE,
+            report_size = 100,
+            report_size_factor = 2
+        )
+        
+        if (nrow(deg_df) > 0) {
+            cell_type_count_type_marker_list[[cell_type]][[marker_df_set$name]]  = deg_df$gene
+        }
+    }
+}
+
+```
+
+```{r plot_overlap_genes}
+# get ven diagram folder name
+dataset_vd_dir <- dir_create(TRUE,deg_dir,paste0("degs_venn_diagrams"))
+dataset_upset_dir <- dir_create(TRUE,deg_dir,paste0("degs_upset_plots"))
+
+fontsize = NULL
+vd_plotlist = list()
+upset_plotlist = list()
+for (cell_type in names(cell_type_count_type_marker_list)) {
+    # we get the deg list for each cell type
+    count_type_marker_list = cell_type_count_type_marker_list[[cell_type]]
+
+    # generate plot only if there are more than one deg vector
+    if (length(count_type_marker_list) > 1) {
+        # upset plot 
+        g_set = unique(unlist(count_type_marker_list))
+
+        # make a dataframe where genes are rows and count types are columns
+        g_df = as.data.frame(matrix(0, nrow = length(g_set), ncol = length(count_type_marker_list)))
+        colnames(g_df) = names(count_type_marker_list)
+        rownames(g_df) = g_set
+
+        # then we fill in the dataframe using count_type_marker_list
+        for (count_type in names(count_type_marker_list)) {
+            g_df[rownames(g_df) %in% count_type_marker_list[[count_type]], count_type] = 1
+        }
+        upset_plotlist[[cell_type]] = upset(g_df, mainbar.y.label = paste0(cell_type,"\nIntersection Size"))
+        pdf(file.path(dataset_upset_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")))
+        print(upset_plotlist[[cell_type]])
+        dev.off()
+
+        # Venn diagram for USA, SA, U
+        # plot upset plot
+        # vd_set_name = c("USA", "SA", "U")[c("USA", "SA", "U") %in% names(count_type_marker_list)]
+        # if (length(vd_set_name) > 1) {
+        #     vd_plotlist[[cell_type]] = ggVennDiagram(
+        #         count_type_marker_list[vd_set_name],
+        #         color = "black",
+        #         lwd = 0.8,
+        #         lty = 1,
+        #         set_size = fontsize,
+        #         label_size = fontsize
+        #     ) +
+        #         scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") +
+        #         labs(title = cell_type) +
+        #         theme(legend.position = "none")
+            
+        #     pdf(file.path(dataset_vd_dir, paste0(gsub("[-/&'() ]+",'_', cell_type), ".pdf")),width = 12,height = 6)
+        #     print(plotlist[[cell_type]])
+        #     dev.off()
+        # }
+    }
+}
+
+
+```
+
+
+#### check DEG with makers
+
+```{r check_DEG_with_markers}
+
+tissue = if(params$sample_type == "human_pbmc" | params$sample_type == "human_bmmc"){"Immune system"}else{"Brain"}
+
+# load gene set preparation function
+source(
+    "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R"
+)
+# load cell type annotation function
+source(
+    "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R"
+)
+db_ <-
+    "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx"
+
+
+# prepare gene sets
+suppressWarnings({
+    suppressMessages({
+        gs_list <- gene_sets_prepare(db_, tissue)
+    })
+})
+
+sctype_markers_list = gs_list$gs_positive
+
+
+for (ct in names(cell_type_count_type_marker_list)) {
+    cat(paste0("Cell type: ", ct, "\n"))
+
+    deg_list = cell_type_count_type_marker_list[[ct]]
+    marker_list = sctype_markers_list[ct]
+    for (count_type in names(deg_list)) {
+        deg_vec = deg_list[[count_type]]
+        marker_vec = marker_list[[ct]]
+        if (length(intersect(deg_vec, marker_vec)) > 0) {
+            cat(paste0("count type: ", count_type, "\n"))
+            cat(paste0("  - DEGs + markers: ", paste(deg_vec[deg_vec %in% marker_vec], collapse = ", "), "\n"))
+        }
+    }
+        cat(paste0( "\n"))
+
+}
+
+
+
+```
+
+
+Overall, imputing the count matrices do not change the DE analysis. This can be explained by the fact that the antisense counts are not very high. Therefore, the imputed counts are not very different from the original counts. However, we do see some novel DEGs in each cluster. We will check those genes to see if they are biologically meaningful.
+
+
+```{r}
+knitr::knit_exit()
+```
+
+
+

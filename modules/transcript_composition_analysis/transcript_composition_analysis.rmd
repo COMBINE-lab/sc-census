@@ -1128,7 +1128,6 @@ export.bed(sort(is),con=file.path(bed_dir, "introns.bed"))
 
 ```
 
-
 ### genes
 
 ```{r get_genes}
@@ -1150,6 +1149,28 @@ protein_coding_genes = sapply(protein_coding_gene_attrs, function(s) {
 protein_coding_genes = protein_coding_genes[protein_coding_genes %in% names(gs)]
 
 export.bed(sort(gs[protein_coding_genes]), con=file.path(bed_dir, "protein_coding_genes.bed"))
+```
+
+### intergenic regions
+
+```{r get_intergenic_regions}
+# we first "unstrand" the genes
+strand(gs) = "*"
+# then we split genes by chromosome
+gsl = split(gs, seqnames(gs))
+gsl = gsl[names(gsl) %in% unique(seqnames(gs))]
+# then we get the range of each chromosome to do setdiff
+df <- data.frame(chr=levels(seqnames(gs)), start=rep(1,nlevels(seqnames(gs))), end=seqlengths(genome)[levels(seqnames(gs))])
+gsl_range = makeGRangesFromDataFrame(df)  # strand value "." is replaced with "*"
+gsl_range = split(gsl_range, seqnames(gsl_range))
+gsl_range = gsl_range[names(gsl_range) %in% names(gsl)]
+
+# setdiff to get intergenic regions
+intergenic = unlist(BiocGenerics::setdiff(gsl_range, gsl))
+
+names(intergenic) <- paste0(seqnames(intergenic), ":", start(intergenic), "-", end(intergenic))
+export.bed(sort(intergenic),con=file.path(bed_dir, "intergenic.bed"))
+
 ```
 
 
