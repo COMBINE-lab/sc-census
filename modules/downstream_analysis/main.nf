@@ -41,7 +41,7 @@ process celltypist() {
     publishDir "${params.output_dir}/downstream_analysis/celltypist_predictions/${sample_name}/${ref_name}", mode: 'symlink'
     label "py"
     input:
-        tuple val(species),
+        tuple val(species_for_rerun_two),
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -50,7 +50,7 @@ process celltypist() {
             path(rc_af_quant)
 
     output:
-        tuple val(species),
+        tuple val(species_for_rerun_two),
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -73,7 +73,7 @@ process sctype() {
     publishDir "${params.output_dir}/downstream_analysis/sctype_predictions/${sample_name}/${ref_name}", mode: 'symlink'
     label "r"
     input:
-        tuple val(species),
+        tuple val(species_for_rerun_two),
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -82,7 +82,7 @@ process sctype() {
             path(rc_af_quant)
 
     output:
-        tuple val(species),
+        tuple val(species_for_rerun_two),
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -123,7 +123,7 @@ process clustering_analysis() {
     publishDir "${params.output_dir}/downstream_analysis/clustering_analysis/${sample_name}/${ref_name}", mode: 'symlink'
 
     input:
-        tuple val(species),
+        tuple val(species_for_rerun_two),
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -173,7 +173,7 @@ process antisense_count_analysis() {
     publishDir "${params.output_dir}/downstream_analysis/antisense_count_analysis/${sample_name}/${ref_name}", mode: 'symlink', pattern: "antisense_count_analysis"
 
     input:
-        tuple val(species),
+        tuple val(species_for_rerun_three),
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -220,7 +220,7 @@ process ocr_count_analysis() {
     publishDir "${params.output_dir}/downstream_analysis/ocr_count_analysis/${sample_name}/${ref_name}/${peak_name}", mode: 'symlink', pattern: "ocr_count_analysis"
 
     input:
-        tuple val(species),
+        tuple val(species_for_rerun_two),
             val(ref_name),
             val(sample_type),
             val(sample_name),
@@ -285,7 +285,7 @@ process atac_ocr_correlation {
     publishDir "${params.output_dir}/downstream_analysis/atac_ocr_correlation/${sample_name}/${ref_name}", mode: 'symlink', pattern: "atac_ocr_correlation"
 
     input: 
-        tuple val(species),
+        tuple val(species_for_rerun_two),
             val(ref_name),
             val(sample_type),
             val(sample_name),

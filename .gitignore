@@ -1,4 +1,8 @@
-data
+data/ccres
+data/celltypist
+data/datasets
+data/peaks
+data/refs
 nextflow
 .nextflow
 .nextflow.*
