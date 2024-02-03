@@ -334,8 +334,8 @@ interm_clusters_result_list = foreach (it_id = seq(1, length(name_list)) , .comb
         verbose = FALSE,
         # mt = FALSE,
         # sct = FALSE
-        mt = count_type == "standard",
-        sct = count_type == "standard"
+        mt = count_type == "standard"
+        #,sct = count_type == "standard"
     )
     gc()
 
@@ -610,7 +610,7 @@ width_count_ratio_batch = foreach (batch_id = seq(1, ncol(intergenic_count), by=
 
 width_count_ratio_df = data.frame(chr = rownames(width_count_ratio_batch), ratio = rowMeans(width_count_ratio_batch))
 
-pdf(file.path(hist_dir, "intergenic_width_count_ratio_hist_ocr.pdf"), width = 10, height = 10)
+pdf(file.path(hist_dir, "intergenic_width_count_ratio_hist_ocr.pdf"))
 
 
 ggplot(width_count_ratio_df, aes(x=ratio)) +
@@ -650,7 +650,7 @@ width_count_ratio_batch = foreach (batch_id = seq(1, ncol(intergenic_count), by=
 
 width_count_ratio_df = data.frame(chr = rownames(width_count_ratio_batch), ratio = rowMeans(width_count_ratio_batch))
 
-pdf(file.path(hist_dir, "intergenic_width_count_ratio_hist_ccres.pdf"), width = 10, height = 10)
+pdf(file.path(hist_dir, "intergenic_width_count_ratio_hist_ccres.pdf"), width = 5, height = 5)
 
 
 ggplot(width_count_ratio_df, aes(x=ratio)) +
@@ -684,7 +684,7 @@ intergenic_df = as.data.frame(ocr_count_intergenic_feature_count[ocr_count_inter
 
 colnames(intergenic_df) = c("ocr_count")
 
-pdf(file.path(hist_dir, "ocr_intergenic_count_hist.pdf"), width = 10, height = 10)
+pdf(file.path(hist_dir, "ocr_intergenic_count_hist.pdf"))
 ggarrange(plotlist = list(
     ggplot(standard_df, aes(x=gene_count)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white", bins = 100)+

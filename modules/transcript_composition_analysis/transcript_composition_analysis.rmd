@@ -35,6 +35,7 @@ suppressPackageStartupMessages({
     library(doParallel)
 })
 ```
+
 ## Introduction
 Single-cell RNA-seq (scRNA-seq) is a powerful tool for studying gene expression at the single-cell level. By design, the sequencing reads from droplet-based scRNA-seq protocols, such as 10x Genomics Chromium systems, should originate from the tail of spliced transcripts. However, recent studies have shown that a significant fraction of reads from 10x Genomics scRNA-seq data are derived outside from 3' tail of transcripts , such as intronic regions in unspliced transcripts. The consequence of this phenomenon is that, because both spliced and unspliced transcripts are the potential source of poly-A priming, and exons are shared by both spliced and unspliced transcripts, the splicing status of the transcript origin of exonic reads cannot be determined.
 

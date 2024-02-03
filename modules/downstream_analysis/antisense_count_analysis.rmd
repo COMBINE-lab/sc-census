@@ -51,11 +51,11 @@ suppressPackageStartupMessages({
 })
 
 # params = list(
-#     utils_path = "/nfshomes/zaza/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
+#     utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
 #     sctype_csv = "sctype_predictions.csv",
 #     fw_quant_dir = "fw",
 #     rc_quant_dir = "rc",
-#     out_dir = "antisense_count_analysis",
+#     out_dir = "/fs/nexus-projects/sc_read_census/nextflow/work/test/antisense_count_analysis",
 #     sample_type = "human_pbmc",
 #     num_threads = 32,
 #     num_pcs = 50,
@@ -266,13 +266,13 @@ If we do not see this correlation, then the antisense reads are not only technic
 we compute the correlation between the sense and antisense count of each cell. 
 ### Compute the correlation between sense and antisense counts of all cells for genes with sense counts
 ```{r}
-shuf_genes_hist_dir = file.path(hist_dir, "sense_genes")
+shuf_genes_hist_dir = file.path(hist_dir, "shuf_genes")
 dir.create(shuf_genes_hist_dir,  recursive = TRUE, showWarnings = FALSE)
 ```
 
 
 Before everything, we want to show that shuffled (random) counts will lead to a cosine similart of zero.
-```{r batch_cell_correlation_spliced}
+```{r batch_cell_correlation_spliced_shuf}
 batch_size=ceiling(ncol(sense_s)/params$num_threads)
 
 sense_s_shuf = sense_s[
@@ -309,7 +309,7 @@ spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s_shuf),by=batch_size), .ino
     spliced_cor_df
 }
 
-pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation.pdf"), width = 10, height = 10)
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(spliced_cor_df, aes(x=spearman)) + 
@@ -327,14 +327,14 @@ print(ggarrange(plotlist = list(
 ))
 dev.off()
 
-pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_spearman.pdf"))
 
     ggplot(spliced_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_pearson.pdf"))
 
 ggplot(spliced_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -342,7 +342,7 @@ ggplot(spliced_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(shuf_genes_hist_dir, "shuffled_correlation_cosine.pdf"))
 
 ggplot(spliced_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -366,6 +366,10 @@ ggarrange(plotlist = list(
 )
 ```
 
+```{r}
+sense_genes_hist_dir = file.path(hist_dir, "sense_genes")
+dir.create(sense_genes_hist_dir,  recursive = TRUE, showWarnings = FALSE)
+```
 
 Let's start with spliced count matrices
 ```{r batch_cell_correlation_spliced}
@@ -396,7 +400,7 @@ spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s),by=batch_size), .inorder=
     spliced_cor_df
 }
 
-pdf(file.path(sense_genes_hist_dir, "spliced_correlation.pdf"), width = 10, height = 10)
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(spliced_cor_df, aes(x=spearman)) + 
@@ -414,14 +418,14 @@ print(ggarrange(plotlist = list(
 ))
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "spliced_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation_spearman.pdf"))
 
     ggplot(spliced_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "spliced_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation_pearson.pdf"))
 
 ggplot(spliced_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -429,7 +433,7 @@ ggplot(spliced_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "spliced_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "spliced_correlation_cosine.pdf"))
 
 ggplot(spliced_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -485,7 +489,7 @@ unspliced_cor_df = foreach (batch_id=seq(1,ncol(sense_u),by=batch_size), .inorde
     spliced_cor_df
 }
 
-pdf(file.path(sense_genes_hist_dir, "unspliced_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(unspliced_cor_df, aes(x=spearman)) + 
@@ -505,21 +509,21 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_spearman.pdf"))
 
     ggplot(unspliced_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_pearson.pdf"))
 
 ggplot(unspliced_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
     geom_density(alpha=.2, fill="#FF6666")
 
 dev.off()
-pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "unspliced_correlation_cosine.pdf"))
 
 ggplot(unspliced_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -575,7 +579,7 @@ ambiguous_cor_df = foreach (batch_id=seq(1,ncol(sense_a),by=batch_size), .inorde
 }
 
 
-pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(ambiguous_cor_df, aes(x=spearman)) + 
@@ -595,14 +599,14 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"))
 
     ggplot(ambiguous_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"))
 
 ggplot(ambiguous_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -610,7 +614,7 @@ ggplot(ambiguous_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"))
 
 ggplot(ambiguous_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -666,7 +670,7 @@ usa_cor_df = foreach (batch_id=seq(1,ncol(sense_usa),by=batch_size), .inorder=FA
 }
 
 
-pdf(file.path(sense_genes_hist_dir, "usa_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "usa_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(usa_cor_df, aes(x=spearman)) + 
@@ -686,14 +690,14 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(sense_genes_hist_dir, "usa_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "usa_correlation_spearman.pdf"))
 
     ggplot(usa_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "usa_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "usa_correlation_pearson.pdf"))
 
 ggplot(usa_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -701,7 +705,7 @@ ggplot(usa_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(sense_genes_hist_dir, "usa_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_genes_hist_dir, "usa_correlation_cosine.pdf"))
 
 ggplot(usa_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -763,7 +767,7 @@ spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s),by=batch_size), .inorder=
 }
 
 
-pdf(file.path(antisense_genes_hist_dir, "spliced_correlation.pdf"), width = 10, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(spliced_cor_df, aes(x=spearman)) + 
@@ -781,14 +785,14 @@ print(ggarrange(plotlist = list(
 ))
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_spearman.pdf"))
 
     ggplot(spliced_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_pearson.pdf"))
 
 ggplot(spliced_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -796,7 +800,7 @@ ggplot(spliced_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "spliced_correlation_cosine.pdf"))
 
 ggplot(spliced_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -852,7 +856,7 @@ unspliced_cor_df = foreach (batch_id=seq(1,ncol(sense_u),by=batch_size), .inorde
     spliced_cor_df
 }
 
-pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(unspliced_cor_df, aes(x=spearman)) + 
@@ -872,21 +876,21 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_spearman.pdf"))
 
     ggplot(unspliced_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_pearson.pdf"))
 
 ggplot(unspliced_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
     geom_density(alpha=.2, fill="#FF6666")
 
 dev.off()
-pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "unspliced_correlation_cosine.pdf"))
 
 ggplot(unspliced_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -941,7 +945,7 @@ ambiguous_cor_df = foreach (batch_id=seq(1,ncol(sense_a),by=batch_size), .inorde
     spliced_cor_df
 }
 
-pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(ambiguous_cor_df, aes(x=spearman)) + 
@@ -961,14 +965,14 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"))
 
     ggplot(ambiguous_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"))
 
 ggplot(ambiguous_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -976,7 +980,7 @@ ggplot(ambiguous_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"))
 
 ggplot(ambiguous_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1031,7 +1035,7 @@ usa_cor_df = foreach (batch_id=seq(1,ncol(sense_usa),by=batch_size), .inorder=FA
     spliced_cor_df
 }
 
-pdf(file.path(antisense_genes_hist_dir, "usa_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(usa_cor_df, aes(x=spearman)) + 
@@ -1051,14 +1055,14 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(antisense_genes_hist_dir, "usa_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation_spearman.pdf"))
 
     ggplot(usa_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "usa_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation_pearson.pdf"))
 
 ggplot(usa_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1066,7 +1070,7 @@ ggplot(usa_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(antisense_genes_hist_dir, "usa_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(antisense_genes_hist_dir, "usa_correlation_cosine.pdf"))
 
 ggplot(usa_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1126,7 +1130,7 @@ spliced_cor_df = foreach (batch_id=seq(1,ncol(sense_s),by=batch_size), .inorder=
     spliced_cor_df
 }
 
-pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation.pdf"), width = 10, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(spliced_cor_df, aes(x=spearman)) + 
@@ -1144,14 +1148,14 @@ print(ggarrange(plotlist = list(
 ))
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_spearman.pdf"))
 
     ggplot(spliced_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_pearson.pdf"))
 
 ggplot(spliced_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1159,7 +1163,7 @@ ggplot(spliced_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "spliced_correlation_cosine.pdf"))
 
 ggplot(spliced_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1215,7 +1219,7 @@ unspliced_cor_df = foreach (batch_id=seq(1,ncol(sense_u),by=batch_size), .inorde
     spliced_cor_df
 }
 
-pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(unspliced_cor_df, aes(x=spearman)) + 
@@ -1235,21 +1239,21 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_spearman.pdf"))
 
     ggplot(unspliced_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_pearson.pdf"))
 
 ggplot(unspliced_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
     geom_density(alpha=.2, fill="#FF6666")
 
 dev.off()
-pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "unspliced_correlation_cosine.pdf"))
 
 ggplot(unspliced_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1303,7 +1307,7 @@ ambiguous_cor_df = foreach (batch_id=seq(1,ncol(sense_a),by=batch_size), .inorde
     rownames(spliced_cor_df) = colnames(batch_antisense_a)
     spliced_cor_df
 }
-pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(ambiguous_cor_df, aes(x=spearman)) + 
@@ -1323,14 +1327,14 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_spearman.pdf"))
 
     ggplot(ambiguous_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_pearson.pdf"))
 
 ggplot(ambiguous_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1338,7 +1342,7 @@ ggplot(ambiguous_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "ambiguous_correlation_cosine.pdf"))
 
 ggplot(ambiguous_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1393,7 +1397,7 @@ usa_cor_df = foreach (batch_id=seq(1,ncol(sense_usa),by=batch_size), .inorder=FA
     spliced_cor_df
 }
 
-pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation.pdf"))
 
 print(ggarrange(plotlist = list(
     ggplot(usa_cor_df, aes(x=spearman)) + 
@@ -1413,14 +1417,14 @@ print(ggarrange(plotlist = list(
 dev.off()
 
 
-pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_spearman.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_spearman.pdf"))
 
     ggplot(usa_cor_df, aes(x=spearman)) + 
         geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
         geom_density(alpha=.2, fill="#FF6666")
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_pearson.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_pearson.pdf"))
 
 ggplot(usa_cor_df, aes(x=pearson)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1428,7 +1432,7 @@ ggplot(usa_cor_df, aes(x=pearson)) +
 
 dev.off()
 
-pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_cosine.pdf"), width = 20, height = 10)
+pdf(file.path(sense_antisense_genes_hist_dir, "usa_correlation_cosine.pdf"))
 
 ggplot(usa_cor_df, aes(x=cosine)) + 
     geom_histogram(aes(y=after_stat(density)), colour="black", fill="white")+
@@ -1467,8 +1471,14 @@ To reduce the effect of technical noise, we will impute the sense count matrix u
 
 total_sense_imputed = sense_usa
 
-total_sense_imputed[sense_usa == 0 & antisense_usa != 0] = 1
+# total_sense_imputed[sense_usa == 0 & antisense_usa != 0] = 1
+# ets = sense_usa == 0 & antisense_usa >= 2
+ets = sense_usa == 0 & antisense_usa != 0
 
+total_sense_imputed[ets] = 1
+
+print(paste0("Number of imputed entries: ", sum(ets), "/", sum(sense_usa != 0), " (", round(sum(ets)/sum(sense_usa != 0)*100,2), "%)"))
+print(paste0("Number of imputed entries: ", sum(ets), "/", sum(sense_usa != 0), " (", round(sum(ets)/sum(sense_usa != 0)*100,2), "%)"))
 ```
 
 Then, we apply the standard Seurat pipeline to find the clusters in the imputed count matrix
@@ -1560,7 +1570,8 @@ for (n_clusters in unique(names(interm_clusters_result_list))) {
         main = paste0("(", n_clusters, " clusters)"),
         dataset_id = "my_data",
         metrics = metrics,
-        fontsize = 15
+        fontsize = 15,
+        angle_col = 90
     )
 
     dir.create(file.path(heatmap_dir, paste0(n_clusters,"_clusters")), recursive = TRUE, showWarnings = FALSE)
@@ -1571,7 +1582,7 @@ for (n_clusters in unique(names(interm_clusters_result_list))) {
                     )
             #         ,
             # width = 10,
-            # height = 10
+            # height = 5
         )
         # Draw the heatmap
         grid::grid.draw(rectGrob(gp=gpar(fill="white", lwd=0)))

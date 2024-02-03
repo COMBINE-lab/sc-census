@@ -158,7 +158,7 @@ seurat_clusters <-
              verbose = FALSE,
              mt = TRUE,
              sct = TRUE,
-             max_n_rounds = 20) {
+             max_n_rounds = 30) {
         clusters_result <- find_seurat_clusters(
             seurat_obj,
             npcs = npcs,
@@ -181,7 +181,7 @@ seurat_clusters <-
         
         n_rounds = 0
         ress = c()
-        while (last_nclusters != n_clusters || n_rounds < max_n_rounds || sum(ress == tuned_resolution) > 2) {
+        while (last_nclusters != n_clusters && n_rounds < max_n_rounds && sum(ress == tuned_resolution)  < 2) {
             # if (n_rounds > max_n_rounds) {
             #     warning("Too many rounds of tuning clustering resolution, returned what we have.")
             #     return(clusters_result)

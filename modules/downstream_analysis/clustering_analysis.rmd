@@ -60,7 +60,7 @@ suppressPackageStartupMessages({
 #     utils_path = "/fs/nexus-projects/sc_read_census/nextflow/modules/downstream_analysis/r_utils.R",
 #     fw_quant_dir = file.path(output_dir, "quantification", sample_name,  ref_type, "simpleaf_quant", "fw_af_quant"),
 #     rc_quant_dir = "rc",
-#     out_dir = "/fs/nexus-projects/sc_read_census/nextflow/work/test/clustering_analysis",
+#     out_dir = "clustering_analysis",
 #     cells_or_nuclei = "nuclei",
 #     sample_type = "human_pbmc",
 #     num_threads = 30,
@@ -241,7 +241,7 @@ interm_clusters_result_list = foreach (it_id = seq(1, length(name_list)) , .comb
         seurat_obj = seurat_obj,
         n_clusters = n_clusters,
         step_size = 0.4,
-        verbose = FALSE
+        verbose = TRUE
     )
 
     out_list = list()
