@@ -1,5 +1,5 @@
 # sc-census
-scCensus is an analysis pipeline focusing on establishing the interpretability of off-target priming reads in scRNA-seq. 
+scCensus is an analysis pipeline focusing on establishing the interpretability of off-target priming reads in scRNA-seq. You can find the preprint at https://www.biorxiv.org/content/10.1101/2024.01.29.577807v1. 
 
 To run the pipeline, you need to have Nextflow and conda installed. If not, please follow the instructions [here](https://www.nextflow.io/docs/latest/getstarted.html) to install Nextflow and [here](https://docs.conda.io/projects/conda/en/latest/user-guide/install/index.html) to install conda.
 
